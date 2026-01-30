@@ -1,57 +1,29 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from pydantic import BaseModel
-from dotenv import load_dotenv
 import os
-from langchain_community.document_loaders import CSVLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-import sqlite3
+from dotenv import load_dotenv
+import chromadb
+from chromadb.config import Settings
+import google.generativeai as genai
+from langchain.prompts import ChatPromptTemplate
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
-app = FastAPI()
+app = FastAPI(title="Verilia Devotional RAG API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Update with your React app URL in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Google Gemini Setup
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-pro")
 
-# Global variables for RAG pipeline
-vector_store = None
-chain = None
-api_key = os.getenv("GOOGLE_API_KEY")
+# ChromaDB Client
+client = chromadb.PersistentClient(path="./chroma_db")
+try:
+    collection = client.get_collection("devotional_docs")
+except:
+    collection = client.create_collection("devotional_docs")
 
-class Query(BaseModel):
-    question: str
-
-def init_rag_pipeline():
-    global vector_store, chain
-    
-    # Load your CSV (upload to repo or use Render Disks for persistence)
-    loader = CSVLoader("devo.csv")
-    data = loader.load()
-    
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_documents(data)
-    
-    embedding_model = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004", google_api_key=api_key
-    )
-    
-    vector_store = Chroma.from_documents(
-        documents=chunks, embedding=embedding_model, persist_directory="./chroma_db"
-    )
-    
-    retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 2})
-    
-    prompt = ChatPromptTemplate.from_template("""
+# YOUR EXACT PROMPT TEMPLATE
+prompt = ChatPromptTemplate.from_template("""
     Use the following pieces of context to answer the question at the end. Own the content above don't use phrases like according to the text above, act like a pastor that answers questions
     If you don't know the answer, just say that you don't know, don't try to make up an answer.
     first return
@@ -62,29 +34,52 @@ def init_rag_pipeline():
     Context: {context}
     Question: {question}
     """)
-    
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=api_key)
-    
-    chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
 
-@app.on_event("startup")
-async def startup_event():
-    init_rag_pipeline()
+class QueryRequest(BaseModel):
+    question: str
 
 @app.post("/query")
-async def query_rag(query: Query):
-    if chain is None:
-        raise HTTPException(status_code=500, detail="RAG pipeline not initialized")
+async def query_devotional(request: QueryRequest):
     try:
-        result = chain.invoke(query.question)
-        return {"answer": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        results = collection.query(
+            query_texts=[request.question],
+            n_results=3,
+            include=["documents", "metadatas"]
+        )
+        context = "\n".join(results['documents'][0]) if results['documents'] else "No context available"
+        metadata = results['metadatas'][0] if results['metadatas'] else []
+        
+        # Extract titles and dates from metadata
+        titles = [m.get('title', 'Unknown') for m in metadata]
+        dates = [m.get('date', 'Unknown') for m in metadata]
+        
+    except:
+        context = "No documents loaded yet"
+        titles = ["No documents"]
+        dates = ["No dates"]
+    
+    # Format context with titles/dates for prompt
+    formatted_context = f"Titles: {', '.join(titles)}\nDates: {', '.join(dates)}\n\n{context}"
+    
+    chain = prompt | llm
+    response = chain.invoke({"context": formatted_context, "question": request.question})
+    
+    return {
+        "question": request.question,
+        "answer": response.content,
+        "context_used": formatted_context[:400] + "..." if len(formatted_context) > 400 else formatted_context,
+        "titles": titles,
+        "dates": dates,
+        "status": "success"
+    }
+
+@app.get("/")
+async def root():
+    return {"message": "Verilia Devotional RAG API LIVE! POST to /query"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "chromadb": "ready"}
 
 if __name__ == "__main__":
     import uvicorn
