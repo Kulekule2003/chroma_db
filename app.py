@@ -3,96 +3,72 @@ from pydantic import BaseModel
 import os
 from dotenv import load_dotenv
 
-from langchain_community.document_loaders import CSVLoader
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 
-# ------------------------
-# ENV + APP
-# ------------------------
 load_dotenv()
+
 app = FastAPI(title="Verilia Devotional RAG API")
 
+# API Key
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
-    raise RuntimeError("GOOGLE_API_KEY not set")
+    raise ValueError("GOOGLE_API_KEY not found in environment")
 
-# ------------------------
-# PATHS
-# ------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(BASE_DIR, "devo.csv")
-
-DB_DIR = "/opt/render/project/src/chroma_db"
-
-# ------------------------
-# MODEL
-# ------------------------
+# Request model
 class QueryRequest(BaseModel):
     question: str
 
-# ------------------------
-# VECTOR STORE
-# ------------------------
-print("Loading devo.csv and initializing vector store...")
+print("Loading Chroma vector store from disk...")
 
-loader = CSVLoader(CSV_PATH)
-data = loader.load()
-
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=200
-)
-chunks = splitter.split_documents(data)
-
+# Embedding function (used only for similarity search, not generation)
 embedding_model = GoogleGenerativeAIEmbeddings(
     model="models/embedding-001",
     google_api_key=api_key
 )
 
-if os.path.exists(DB_DIR):
-    print("Loading existing Chroma DB...")
-    vector_store = Chroma(
-        persist_directory=DB_DIR,
-        embedding_function=embedding_model
-    )
-else:
-    print("Building new Chroma DB...")
-    vector_store = Chroma.from_documents(
-        documents=chunks,
-        embedding=embedding_model,
-        persist_directory=DB_DIR
-    )
+# Load prebuilt vector DB (NO Gemini calls here)
+vector_store = Chroma(
+    persist_directory="./chroma_db",
+    embedding_function=embedding_model
+)
 
 retriever = vector_store.as_retriever(
     search_type="similarity",
     search_kwargs={"k": 2}
 )
 
-# ------------------------
-# PROMPT + LLM
-# ------------------------
+# Prompt
 prompt = ChatPromptTemplate.from_template("""
-Use the following pieces of context to answer the question at the end. own the content above don't use phrases like according to the text above, act like a pastor that answers questions
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-first return
-1. The title(s) of the devotional(s) where you getting the answer
+Use the following pieces of context to answer the question at the end.
+Own the content — do not say "according to the text above."
+Answer like a pastor speaking clearly and confidently.
+
+If you don't know the answer, just say you don't know.
+
+First return:
+1. The title(s) of the devotional(s) where you got the answer
 2. Date(s) of release
-3. Then return the answer to the question
-4. return some scriptures for reference
-Context: {context}
-Question: {question}
+3. Then return the answer
+4. Return some scriptures for reference
+
+Context:
+{context}
+
+Question:
+{question}
 """)
 
+# Gemini LLM
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     google_api_key=api_key
 )
 
+# RAG Chain
 chain = (
     {"context": retriever, "question": RunnablePassthrough()}
     | prompt
@@ -100,9 +76,7 @@ chain = (
     | StrOutputParser()
 )
 
-# ------------------------
-# ROUTES
-# ------------------------
+# Routes
 @app.post("/query")
 async def query_devotional(request: QueryRequest):
     result = chain.invoke(request.question)
@@ -112,13 +86,10 @@ async def query_devotional(request: QueryRequest):
         "status": "success"
     }
 
+@app.get("/")
+async def root():
+    return {"message": "Verilia Devotional RAG API LIVE! POST to /query"}
+
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
-
-# ------------------------
-# LOCAL DEV
-# ------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    return {"status": "healthy", "vector_db": "loaded"}
