@@ -1,47 +1,33 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import os
-from dotenv import load_dotenv
-
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-
-load_dotenv()
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 app = FastAPI(title="Verilia Devotional RAG API")
 
-# API Key
+# API Key (ONLY for LLM generation)
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
     raise ValueError("GOOGLE_API_KEY not found in environment")
 
-# Request model
-class QueryRequest(BaseModel):
-    question: str
+print("Loading FREE HuggingFace embeddings...")
+# ✅ FREE EMBEDDINGS - NO GEMINI QUOTA
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-print("Loading Chroma vector store from disk...")
-
-# Embedding function (used only for similarity search, not generation)
-embedding_model = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001",
-    google_api_key=api_key
-)
-
-# Load prebuilt vector DB (NO Gemini calls here)
+print("Loading Chroma vector store...")
+# ✅ Load with matching FREE embeddings
 vector_store = Chroma(
-    persist_directory="./chroma_db",
+    persist_directory="./chroma_db_free",
     embedding_function=embedding_model
 )
 
-retriever = vector_store.as_retriever(
-    search_type="similarity",
-    search_kwargs={"k": 2}
-)
+retriever = vector_store.as_retriever(search_kwargs={"k": 2})
 
-# Prompt
 prompt = ChatPromptTemplate.from_template("""
 Use the following pieces of context to answer the question at the end.
 Own the content — do not say "according to the text above."
@@ -62,13 +48,9 @@ Question:
 {question}
 """)
 
-# Gemini LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    google_api_key=api_key
-)
+# ✅ Gemini ONLY for text generation (has quota)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key)
 
-# RAG Chain
 chain = (
     {"context": retriever, "question": RunnablePassthrough()}
     | prompt
@@ -76,15 +58,16 @@ chain = (
     | StrOutputParser()
 )
 
-# Routes
+class QueryRequest(BaseModel):
+    question: str
+
 @app.post("/query")
 async def query_devotional(request: QueryRequest):
-    result = chain.invoke(request.question)
-    return {
-        "question": request.question,
-        "answer": result,
-        "status": "success"
-    }
+    try:
+        result = chain.invoke(request.question)
+        return {"question": request.question, "answer": result, "status": "success"}
+    except Exception as e:
+        return {"question": request.question, "error": str(e), "status": "error"}
 
 @app.get("/")
 async def root():
