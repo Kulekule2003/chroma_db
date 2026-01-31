@@ -50,7 +50,7 @@ splitter = RecursiveCharacterTextSplitter(
 chunks = splitter.split_documents(data)
 
 embedding_model = GoogleGenerativeAIEmbeddings(
-    model="models/text-embedding-004",
+    model="models/embedding-001",
     google_api_key=api_key
 )
 
@@ -89,7 +89,7 @@ Question: {question}
 """)
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-flash",
     google_api_key=api_key
 )
 
