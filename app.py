@@ -1,5 +1,6 @@
 # app.py
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 from itertools import cycle
@@ -10,6 +11,25 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.retrievers import BaseRetriever
+
+
+app = FastAPI(
+    title="ai scriptural councellor",
+    # ... other args if any
+)
+#cors configurations
+origins = [
+    "http://localhost:3000",
+    "https://the-mustard-seed.vercel.app"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,           # important if using cookies/auth
+    allow_methods=["*"],              # allow GET, POST, PUT, DELETE, OPTIONS, etc.
+    allow_headers=["*"],              # allow Content-Type, Authorization, etc.
+)
 
 # ──────────────────────────
 # CONFIG
