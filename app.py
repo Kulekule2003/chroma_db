@@ -1,25 +1,31 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+import os
+
 from langchain_chroma import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-
 from langchain_core.retrievers import BaseRetriever
 
 # --------------------------
 # CONFIG
 # --------------------------
 DB_DIR = "chroma_db"
-API_KEY = "YOUR_GOOGLE_API_KEY"  # Use env variable in production
+API_KEY = os.environ.get("GOOGLE_API_KEY")  # Use env var on Render
 
 # --------------------------
 # LOAD VECTORSTORE
 # --------------------------
+embedding_model = GoogleGenerativeAIEmbeddings(
+    model="models/text-embedding-004",
+    google_api_key=API_KEY
+)
+
 vectorstore = Chroma(
     persist_directory=DB_DIR,
-    embedding_function=None  # only needed if adding new docs
+    embedding_function=embedding_model  # Must match what was used when building
 )
 
 retriever: BaseRetriever = vectorstore.as_retriever(
