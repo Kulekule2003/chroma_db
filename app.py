@@ -37,6 +37,7 @@ GOOGLE_API_KEY = API_KEYS[0]  # use first key for LLM
 # --------------------------
 vectorstore = Chroma(
     persist_directory=DB_DIR,
+    embedding_function=get_embedder()
     # embedding_function removed since DB already exists and is only for querying
 )
 
