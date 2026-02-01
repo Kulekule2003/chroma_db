@@ -11,12 +11,13 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.retrievers import BaseRetriever
 
-# --------------------------
+# ──────────────────────────
 # CONFIG
-# --------------------------
+# ──────────────────────────
 DB_DIR = "chroma_db"
+COLLECTION_NAME = "devo_collection"  # explicit name – helps consistency
 
-# Load your Google API keys as environment variable (comma separated)
+# Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
 if not API_KEYS or API_KEYS == [""]:
     raise ValueError("Set GOOGLE_API_KEYS in environment variables (comma separated)")
@@ -24,31 +25,42 @@ if not API_KEYS or API_KEYS == [""]:
 key_cycle = cycle(API_KEYS)
 
 def get_embedder():
-    """Return a Google embedding object (only first key is enough for querying)."""
+    """Create Google embedding model with rotating API keys."""
     return GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         google_api_key=next(key_cycle)
     )
 
-GOOGLE_API_KEY = API_KEYS[0]  # use first key for LLM
+GOOGLE_API_KEY = API_KEYS[0]  # First key used for the LLM
 
-# --------------------------
-# LOAD VECTORSTORE
-# --------------------------
+# ──────────────────────────
+# LOAD VECTORSTORE + EMBEDDER CHECK
+# ──────────────────────────
+embedder = get_embedder()  # Instantiate once
+
 vectorstore = Chroma(
     persist_directory=DB_DIR,
-    embedding_function=get_embedder()
-    # embedding_function removed since DB already exists and is only for querying
+    embedding_function=embedder,           # Required for query-time embedding
+    collection_name=COLLECTION_NAME        # Explicit name – recommended
 )
+
+# Quick startup check: verify embedder works and log dimension
+try:
+    test_query = "test sentence for dimension check"
+    test_embedding = embedder.embed_query(test_query)
+    dimension = len(test_embedding)
+    print(f"[STARTUP] Embedding model dimension: {dimension} (expected 768 for text-embedding-004)")
+except Exception as e:
+    print(f"[STARTUP ERROR] Embedder dimension check failed: {str(e)}")
 
 retriever: BaseRetriever = vectorstore.as_retriever(
     search_type="similarity",
     search_kwargs={"k": 2}
 )
 
-# --------------------------
+# ──────────────────────────
 # PROMPT TEMPLATE
-# --------------------------
+# ──────────────────────────
 prompt = ChatPromptTemplate.from_template("""
 Use the following pieces of context to answer the question at the end. Own the content above, act like a pastor.
 If you don't know the answer, just say that you don't know.
@@ -61,9 +73,9 @@ Context: {context}
 Question: {question}
 """)
 
-# --------------------------
+# ──────────────────────────
 # LLM
-# --------------------------
+# ──────────────────────────
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash",
     google_api_key=GOOGLE_API_KEY
@@ -76,9 +88,9 @@ chain = (
     | StrOutputParser()
 )
 
-# --------------------------
+# ──────────────────────────
 # API
-# --------------------------
+# ──────────────────────────
 class Question(BaseModel):
     question: str
 
@@ -92,9 +104,6 @@ async def chat(q: Question):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --------------------------
-# Root endpoint
-# --------------------------
 @app.get("/")
 async def root():
     return {"message": "RAG Chat API is running!"}
