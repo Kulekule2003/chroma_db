@@ -1,9 +1,11 @@
+# app.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import os
+from itertools import cycle
 
 from langchain_chroma import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
@@ -13,14 +15,29 @@ from langchain_core.retrievers import BaseRetriever
 # CONFIG
 # --------------------------
 DB_DIR = "chroma_db"
-API_KEY = os.environ.get("GOOGLE_API_KEY")  # safer for Render
+
+# Load your Google API keys as environment variable (comma separated)
+API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
+if not API_KEYS or API_KEYS == [""]:
+    raise ValueError("Set GOOGLE_API_KEYS in environment variables (comma separated)")
+
+key_cycle = cycle(API_KEYS)
+
+def get_embedder():
+    """Return a Google embedding object (only first key is enough for querying)."""
+    return GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004",
+        google_api_key=next(key_cycle)
+    )
+
+GOOGLE_API_KEY = API_KEYS[0]  # use first key for LLM
 
 # --------------------------
-# LOAD VECTORSTORE (prebuilt embeddings)
+# LOAD VECTORSTORE
 # --------------------------
 vectorstore = Chroma(
     persist_directory=DB_DIR,
-    embedding_function=None  # use existing vectors
+    embedding_function=get_embedder()  # required for prebuilt DB
 )
 
 retriever: BaseRetriever = vectorstore.as_retriever(
@@ -32,9 +49,9 @@ retriever: BaseRetriever = vectorstore.as_retriever(
 # PROMPT TEMPLATE
 # --------------------------
 prompt = ChatPromptTemplate.from_template("""
-Use the following pieces of context to answer the question at the end. own the content above, act like a pastor.
+Use the following pieces of context to answer the question at the end. Own the content above, act like a pastor.
 If you don't know the answer, just say that you don't know.
-first return
+Return:
 1. The title(s) of the devotional(s)
 2. Date(s) of release
 3. Answer to the question
@@ -48,7 +65,7 @@ Question: {question}
 # --------------------------
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash",
-    google_api_key=API_KEY
+    google_api_key=GOOGLE_API_KEY
 )
 
 chain = (
@@ -73,3 +90,10 @@ async def chat(q: Question):
         return {"answer": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --------------------------
+# Root endpoint
+# --------------------------
+@app.get("/")
+async def root():
+    return {"message": "RAG Chat API is running!"}
