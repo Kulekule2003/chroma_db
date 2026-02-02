@@ -9,15 +9,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from langchain_google_genai import (
-    ChatGoogleGenerativeAI,
-    GoogleGenerativeAIEmbeddings,
-)
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.retrievers import BaseRetriever
-from langchain_chroma import Chroma
 
 # ──────────────────────────
 # CONFIG & PATHS
@@ -25,29 +21,26 @@ from langchain_chroma import Chroma
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 app = FastAPI(title="AI Scriptural Counsellor")
 
-# Find chroma_db folder relative to this file
 current_dir = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(current_dir, "chroma_db")
 COLLECTION_NAME = "devo_collection"
 
-# ──────────────────────────
-# CORS
-# ──────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Adjust for production security
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ──────────────────────────
-# EMBEDDINGS & KEYS
+# API KEYS
 # ──────────────────────────
-API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
-if not API_KEYS or API_KEYS == [""]:
-    raise RuntimeError("GOOGLE_API_KEYS environment variable not set")
+raw_keys = os.environ.get("GOOGLE_API_KEYS", "")
+if not raw_keys:
+    raise RuntimeError("GOOGLE_API_KEYS environment variable is missing")
 
+API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 key_cycle = cycle(API_KEYS)
 
 def get_embedder():
@@ -57,9 +50,8 @@ def get_embedder():
     )
 
 # ──────────────────────────
-# VECTORSTORE INITIALIZATION
+# VECTORSTORE & RETRIEVER
 # ──────────────────────────
-# Initialize modern persistent client
 chroma_client = chromadb.PersistentClient(path=DB_DIR)
 
 vectorstore = Chroma(
@@ -68,32 +60,46 @@ vectorstore = Chroma(
     embedding_function=get_embedder(),
 )
 
-retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
+# Set up retriever explicitly
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
 # ──────────────────────────
-# RAG CHAIN
+# THE FIX: SAFE FORMATTING
 # ──────────────────────────
 def format_docs(docs):
-    if not docs: return "No context found."
-    return "\n\n".join(
-        f"Title: {d.metadata.get('title', 'Unknown')}\nContent: {d.page_content}"
-        for d in docs
-    )
+    # This check prevents the 'int' has no len() error
+    if not docs or isinstance(docs, int):
+        return "No relevant devotional content found."
+    
+    # Ensure we are iterating over a list of documents
+    return "\n\n".join(doc.page_content for doc in docs)
 
+# ──────────────────────────
+# PROMPT & LLM
+# ──────────────────────────
 prompt = ChatPromptTemplate.from_template("""
-You are a Christian pastor. Use the context to answer the question.
+You are a Christian pastor. Use the following snippets from devotional writings to answer the question. 
+If the context doesn't contain the answer, use your knowledge of the Bible to provide a supportive, pastoral response.
+
 Context: {context}
 Question: {question}
 """)
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash", # Updated to current stable model
+    model="gemini-1.5-flash", 
     google_api_key=API_KEYS[0],
+    temperature=0.7
 )
 
+# Build the chain with the fixed formatter
 chain = (
-    {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
-    | prompt | llm | StrOutputParser()
+    {
+        "context": retriever | RunnableLambda(format_docs), 
+        "question": RunnablePassthrough()
+    }
+    | prompt 
+    | llm 
+    | StrOutputParser()
 )
 
 # ──────────────────────────
@@ -104,20 +110,22 @@ class Question(BaseModel):
 
 @app.get("/")
 async def root():
-    return {"status": "RAG Chat API running"}
+    try:
+        count = chroma_client.get_collection(COLLECTION_NAME).count()
+        return {"status": "RAG API Online", "docs_count": count}
+    except:
+        return {"status": "Online", "error": "Collection not found"}
 
 @app.post("/chat")
 async def chat(q: Question):
     try:
-        result = chain.invoke(q.question)
-        return {"answer": result}
+        # Debugging: check if question is received
+        if not q.question:
+            raise HTTPException(status_code=400, detail="Question is empty")
+            
+        response = chain.invoke(q.question)
+        return {"answer": response}
     except Exception as e:
+        # Print the full error to Render logs
+        print(f"CHAT ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/debug-db")
-async def debug_db():
-    try:
-        count = chroma_client.get_collection(COLLECTION_NAME).count()
-        return {"collection": COLLECTION_NAME, "count": count, "path": DB_DIR}
-    except Exception as e:
-        return {"error": str(e)}
