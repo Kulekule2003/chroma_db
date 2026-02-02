@@ -64,7 +64,7 @@ embedder = get_embedder()  # Instantiate once
 vectorstore = Chroma(
     persist_directory=DB_DIR,
     embedding_function=embedder,           # Required for query-time embedding
-    collection_name=COLLECTION_NAME
+    collection_name="2c202c69-4129-4e4b-a2bc-6a416e7d09a2"
 )
 
 # Quick startup check: verify embedder works and log dimension
