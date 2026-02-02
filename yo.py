@@ -1,12 +1,11 @@
-from langchain_chroma import Chroma
-import os
+import chromadb
 
-DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+client = chromadb.PersistentClient(path="./chroma_db")
 
-# List all collections in the DB folder
-try:
-    # Initialize without specifying a collection first
-    temp_store = Chroma(persist_directory=DB_DIR)
-    print("Collections in DB:", temp_store.list_collections())
-except Exception as e:
-    print("Error reading DB:", e)
+cols = client.list_collections()
+print("Collections:", cols)
+
+if cols:
+    col = cols[0]
+    print("Using:", col.name)
+    print("Document count:", col.count())

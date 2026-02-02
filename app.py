@@ -37,9 +37,7 @@ app.add_middleware(
 
 
 DB_DIR = "chroma_db"
-
-collections = [f for f in os.listdir(DB_DIR) if os.path.isdir(os.path.join(DB_DIR, f))]
-collection_name = collections[0]  # picks the UUID folder  # explicit name – helps consistency
+collection_name = "langchain" # picks the UUID folder  # explicit name – helps consistency
 
 # Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
