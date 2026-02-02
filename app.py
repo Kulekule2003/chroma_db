@@ -61,7 +61,7 @@ embedder = get_embedder()  # Instantiate once
 vectorstore = Chroma(
     persist_directory=DB_DIR,
     embedding_function=embedder,           # Required for query-time embedding
-    collection_name=COLLECTION_NAME        # Explicit name – recommended
+
 )
 
 # Quick startup check: verify embedder works and log dimension
@@ -125,3 +125,5 @@ async def chat(q: Question):
 @app.get("/")
 async def root():
     return {"message": "RAG Chat API is running!"}
+
+
