@@ -35,10 +35,11 @@ app.add_middleware(
 # CONFIG
 # ──────────────────────────
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_DIR = os.path.join(BASE_DIR, "chroma_db")
 
-COLLECTION_NAME = "2c202c69-4129-4e4b-a2bc-6a416e7d09a2"  # explicit name – helps consistency
+DB_DIR = "chroma_db"
+
+collections = [f for f in os.listdir(DB_DIR) if os.path.isdir(os.path.join(DB_DIR, f))]
+collection_name = collections[0]  # picks the UUID folder  # explicit name – helps consistency
 
 # Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
@@ -64,8 +65,10 @@ embedder = get_embedder()  # Instantiate once
 vectorstore = Chroma(
     persist_directory=DB_DIR,
     embedding_function=embedder,           # Required for query-time embedding
-    collection_name="2c202c69-4129-4e4b-a2bc-6a416e7d09a2"
+    collection_name=collection_name
 )
+
+print(">>>>>>>><<<<<Loaded collection:", collection_name)
 
 # Quick startup check: verify embedder works and log dimension
 try:
