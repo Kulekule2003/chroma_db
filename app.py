@@ -35,7 +35,7 @@ app.add_middleware(
 # CONFIG
 # ──────────────────────────
 DB_DIR = "chroma_db"
-COLLECTION_NAME = "langchain"  # explicit name – helps consistency
+COLLECTION_NAME = "devo_collection"  # explicit name – helps consistency
 
 # Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
@@ -125,5 +125,13 @@ async def chat(q: Question):
 @app.get("/")
 async def root():
     return {"message": "RAG Chat API is running!"}
+
+@app.get("/debug-db")
+async def debug_db():
+    try:
+        count = vectorstore._collection.count()
+        return {"documents_in_db": count}
+    except Exception as e:
+        return {"error": str(e)}
 
 
