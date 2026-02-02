@@ -142,9 +142,13 @@ async def root():
 @app.get("/debug-db")
 async def debug_db():
     try:
-        count = vectorstore._collection.count()
-        return {"documents_in_db": count}
+        data = vectorstore._collection.get(include=["documents"])
+        return {
+            "documents_in_db": len(data["documents"]),
+            "collection_name": collection_name
+        }
     except Exception as e:
         return {"error": str(e)}
+
 
 
