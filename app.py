@@ -114,8 +114,6 @@ chain = (
 class Question(BaseModel):
     question: str
 
-app = FastAPI()
-
 @app.post("/chat")
 async def chat(q: Question):
     try:
