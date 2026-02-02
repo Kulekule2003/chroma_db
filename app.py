@@ -49,7 +49,7 @@ app.add_middleware(
 # ──────────────────────────
 # CONFIG
 # ──────────────────────────
-DB_DIR = "chroma_db"
+DB_DIR = "/opt/render/project/src/chroma_db"
 COLLECTION_NAME = "langchain"
 
 # Load Google API keys from environment (comma-separated)
