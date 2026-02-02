@@ -12,6 +12,15 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.retrievers import BaseRetriever
 
+from langchain_core.runnables import RunnableLambda
+
+def format_docs(docs):
+    return "\n\n".join(
+        f"Title: {doc.metadata.get('title', 'Unknown')}\n"
+        f"Date: {doc.metadata.get('date', 'Unknown')}\n"
+        f"Content: {doc.page_content}"
+        for doc in docs
+    )
 
 app = FastAPI(
     title="ai scriptural councellor",
@@ -106,7 +115,7 @@ llm = ChatGoogleGenerativeAI(
 )
 
 chain = (
-    {"context": retriever, "question": RunnablePassthrough()}
+    {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
     | prompt
     | llm
     | StrOutputParser()
