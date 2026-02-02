@@ -6,7 +6,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from langchain_chroma import Chroma
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     GoogleGenerativeAIEmbeddings,
@@ -15,6 +14,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.retrievers import BaseRetriever
+
+from langchain_chroma import Chroma
+
+from chromadb import Client
+from chromadb.config import Settings
 
 # ──────────────────────────
 # ENV / TELEMETRY
@@ -67,14 +71,24 @@ def get_embedder():
 GOOGLE_API_KEY = API_KEYS[0]
 
 # ──────────────────────────
+# CHROMA CLIENT (VERSION SAFE)
+# ──────────────────────────
+chroma_client = Client(
+    Settings(
+        persist_directory=DB_DIR,
+        anonymized_telemetry=False,
+    )
+)
+
+# ──────────────────────────
 # VECTORSTORE
 # ──────────────────────────
 embedder = get_embedder()
 
 vectorstore = Chroma(
-    persist_directory=DB_DIR,
-    embedding_function=embedder,
+    client=chroma_client,
     collection_name=COLLECTION_NAME,
+    embedding_function=embedder,
 )
 
 print(">>>>>>>><<<<< Loaded collection:", COLLECTION_NAME)
@@ -181,10 +195,12 @@ async def chat(q: Question):
 @app.get("/debug-db")
 async def debug_db():
     try:
-        data = vectorstore._collection.get(include=["documents"])
+        collection = chroma_client.get_collection(COLLECTION_NAME)
+        count = collection.count()
+
         return {
             "collection_name": COLLECTION_NAME,
-            "documents_in_db": len(data["documents"]),
+            "documents_in_db": count,
         }
     except Exception as e:
         return {"error": str(e)}
