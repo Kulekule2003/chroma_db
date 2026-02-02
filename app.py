@@ -1,131 +1,173 @@
 # app.py
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import os
 from itertools import cycle
 
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
 from langchain_chroma import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
+)
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.retrievers import BaseRetriever
 
-from langchain_core.runnables import RunnableLambda
+# ──────────────────────────
+# ENV / TELEMETRY
+# ──────────────────────────
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-def format_docs(docs):
-    return "\n\n".join(
-        f"Title: {doc.metadata.get('title', 'Unknown')}\n"
-        f"Date: {doc.metadata.get('date', 'Unknown')}\n"
-        f"Content: {doc.page_content}"
-        for doc in docs
-    )
+# ──────────────────────────
+# APP
+# ──────────────────────────
+app = FastAPI(title="AI Scriptural Counsellor")
 
-app = FastAPI(
-    title="ai scriptural councellor",
-    # ... other args if any
-)
-#cors configurations
+# ──────────────────────────
+# CORS
+# ──────────────────────────
 origins = [
     "http://localhost:3000",
-    "https://the-mustard-seed.vercel.app"
+    "https://the-mustard-seed.vercel.app",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,           # important if using cookies/auth
-    allow_methods=["*"],              # allow GET, POST, PUT, DELETE, OPTIONS, etc.
-    allow_headers=["*"],              # allow Content-Type, Authorization, etc.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ──────────────────────────
 # CONFIG
 # ──────────────────────────
-
-
 DB_DIR = "chroma_db"
-collection_name = "langchain" # picks the UUID folder  # explicit name – helps consistency
+COLLECTION_NAME = "langchain"
 
 # Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
 if not API_KEYS or API_KEYS == [""]:
-    raise ValueError("Set GOOGLE_API_KEYS in environment variables (comma separated)")
+    raise RuntimeError("GOOGLE_API_KEYS environment variable not set")
 
 key_cycle = cycle(API_KEYS)
 
+# ──────────────────────────
+# EMBEDDINGS
+# ──────────────────────────
 def get_embedder():
-    """Create Google embedding model with rotating API keys."""
     return GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
-        google_api_key=next(key_cycle)
+        google_api_key=next(key_cycle),
     )
 
-GOOGLE_API_KEY = API_KEYS[0]  # First key used for the LLM
+GOOGLE_API_KEY = API_KEYS[0]
 
 # ──────────────────────────
-# LOAD VECTORSTORE + EMBEDDER CHECK
+# VECTORSTORE
 # ──────────────────────────
-embedder = get_embedder()  # Instantiate once
+embedder = get_embedder()
 
 vectorstore = Chroma(
     persist_directory=DB_DIR,
-    embedding_function=embedder,           # Required for query-time embedding
-    collection_name=collection_name
+    embedding_function=embedder,
+    collection_name=COLLECTION_NAME,
 )
 
-print(">>>>>>>><<<<<Loaded collection:", collection_name)
+print(">>>>>>>><<<<< Loaded collection:", COLLECTION_NAME)
 
-# Quick startup check: verify embedder works and log dimension
+# Startup sanity check
 try:
-    test_query = "test sentence for dimension check"
-    test_embedding = embedder.embed_query(test_query)
-    dimension = len(test_embedding)
-    print(f"[STARTUP] Embedding model dimension: {dimension} (expected 768 for text-embedding-004)")
+    test_embedding = embedder.embed_query("dimension test")
+    print(
+        f"[STARTUP] Embedding dimension: {len(test_embedding)} "
+        f"(expected 768 for text-embedding-004)"
+    )
 except Exception as e:
-    print(f"[STARTUP ERROR] Embedder dimension check failed: {str(e)}")
+    print("[STARTUP ERROR] Embedder failed:", str(e))
 
+# ──────────────────────────
+# RETRIEVER
+# ──────────────────────────
 retriever: BaseRetriever = vectorstore.as_retriever(
     search_type="similarity",
-    search_kwargs={"k": 2}
+    search_kwargs={"k": 2},
 )
 
 # ──────────────────────────
-# PROMPT TEMPLATE
+# CONTEXT FORMATTER
 # ──────────────────────────
-prompt = ChatPromptTemplate.from_template("""
-Use the following pieces of context to answer the question at the end. Own the content above, act like a pastor.
-If you don't know the answer, just say that you don't know.
+def format_docs(docs):
+    if not docs:
+        return "No devotional context found."
+
+    return "\n\n".join(
+        f"Title: {doc.metadata.get('title', 'Unknown')}\n"
+        f"Date: {doc.metadata.get('date', 'Unknown')}\n"
+        f"Content:\n{doc.page_content}"
+        for doc in docs
+    )
+
+# ──────────────────────────
+# PROMPT
+# ──────────────────────────
+prompt = ChatPromptTemplate.from_template(
+    """
+You are a Christian pastor and devotional guide.
+
+Use the following context to answer the question.
+If the context does not contain the answer, say you don't know.
+
 Return:
-1. The title(s) of the devotional(s)
+1. Title(s) of devotional(s)
 2. Date(s) of release
 3. Answer to the question
-4. Some scriptures for reference
-Context: {context}
-Question: {question}
-""")
+4. Relevant scripture references
+
+Context:
+{context}
+
+Question:
+{question}
+"""
+)
 
 # ──────────────────────────
 # LLM
 # ──────────────────────────
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
-    google_api_key=GOOGLE_API_KEY
+    google_api_key=GOOGLE_API_KEY,
 )
 
+# ──────────────────────────
+# CHAIN
+# ──────────────────────────
 chain = (
-    {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
+    {
+        "context": retriever | RunnableLambda(format_docs),
+        "question": RunnablePassthrough(),
+    }
     | prompt
     | llm
     | StrOutputParser()
 )
 
 # ──────────────────────────
-# API
+# API MODELS
 # ──────────────────────────
 class Question(BaseModel):
     question: str
+
+# ──────────────────────────
+# ROUTES
+# ──────────────────────────
+@app.get("/")
+async def root():
+    return {"status": "RAG Chat API running"}
 
 @app.post("/chat")
 async def chat(q: Question):
@@ -133,22 +175,16 @@ async def chat(q: Question):
         result = chain.invoke(q.question)
         return {"answer": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/")
-async def root():
-    return {"message": "RAG Chat API is running!"}
+        print("[CHAT ERROR]", str(e))
+        raise HTTPException(status_code=500, detail="RAG processing failed")
 
 @app.get("/debug-db")
 async def debug_db():
     try:
         data = vectorstore._collection.get(include=["documents"])
         return {
+            "collection_name": COLLECTION_NAME,
             "documents_in_db": len(data["documents"]),
-            "collection_name": collection_name
         }
     except Exception as e:
         return {"error": str(e)}
-
-
-
