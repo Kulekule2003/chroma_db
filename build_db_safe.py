@@ -1,3 +1,7 @@
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 import os
 import json
 from itertools import cycle
@@ -11,12 +15,14 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 # CONFIG
 # ======================
 CSV_FILE = "devo.csv"
-DB_DIR = "chroma_db"
+DB_DIR = "./chroma_db"
+COLLECTION_NAME = "devo_collection"
 PROGRESS_FILE = "progress.json"
-BATCH_SIZE = 50  # larger batch for efficiency
+BATCH_SIZE = 50 
 
+# Replace with your actual keys locally
 API_KEYS = [
-    "AIzaSyAoCHHJgIbjJwrTAtyLnm2hQJIBd5XP4Ig",
+   "AIzaSyAoCHHJgIbjJwrTAtyLnm2hQJIBd5XP4Ig",
     "AIzaSyBu_TjtJMx1Y5BIyUtqb_kD8Ur99tT5VNo",
     "AIzaSyBq7FCSJXdD1gc5-my9iebIH0eFDwwyT40",
     "AIzaSyBlz-ExdB6u3GPNYVUgbpkKZx7pSWr3HWk",
@@ -45,9 +51,11 @@ else:
 # ======================
 # LOAD CSV SAFELY
 # ======================
-print("Loading CSV with safe encoding...")
-
+print("Loading CSV...")
 documents = []
+
+if not os.path.exists(CSV_FILE):
+    raise FileNotFoundError(f"Could not find {CSV_FILE}")
 
 with open(CSV_FILE, "rb") as f:
     raw = f.read()
@@ -58,48 +66,33 @@ except UnicodeDecodeError:
     text = raw.decode("latin-1")
 
 lines = text.splitlines()
-
 for idx, line in enumerate(lines):
     row_text = line.strip()
-    if len(row_text) < 20:  # skip tiny or empty rows
+    if len(row_text) < 20:
         continue
-
-    doc = Document(
-        page_content=row_text,
-        metadata={"row": idx}
-    )
+    doc = Document(page_content=row_text, metadata={"row": idx})
     documents.append(doc)
 
 print("Total rows loaded:", len(documents))
 
 # ======================
-# CHUNKING (OPTIMIZED)
+# CHUNKING
 # ======================
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,  # bigger chunks for fewer total embeddings
-    chunk_overlap=20  # smaller overlap
-)
-
+splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=20)
 chunks = splitter.split_documents(documents)
-print("Total chunks after optimization:", len(chunks))
 
-# ======================
-# ASSIGN STABLE IDS
-# ======================
 for i, chunk in enumerate(chunks):
     chunk.metadata["chunk_id"] = f"chunk_{i}"
 
 # ======================
-# LOAD OR CREATE DB
+# CREATE DB
 # ======================
 vectorstore = Chroma(
+    collection_name=COLLECTION_NAME,
     persist_directory=DB_DIR,
     embedding_function=get_embedder()
 )
 
-# ======================
-# HELPER: SAVE PROGRESS
-# ======================
 def save_progress():
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(completed_ids), f)
@@ -109,29 +102,19 @@ def save_progress():
 # ======================
 for i in range(0, len(chunks), BATCH_SIZE):
     batch = chunks[i:i + BATCH_SIZE]
-
-    to_add = []
-    for c in batch:
-        cid = c.metadata["chunk_id"]
-        if cid not in completed_ids:
-            to_add.append(c)
+    to_add = [c for c in batch if c.metadata["chunk_id"] not in completed_ids]
 
     if not to_add:
         continue
 
     try:
         print(f"Embedding {len(to_add)} chunks...")
-        vectorstore.add_documents(to_add)  # Chroma auto-saves
-
+        vectorstore.add_documents(to_add)
         for c in to_add:
             completed_ids.add(c.metadata["chunk_id"])
-
         save_progress()
-
     except Exception as e:
-        print("API/Quota error:", e)
-        print("You can safely rerun the script to resume.")
+        print("Error:", e)
         break
 
-print("Embedding process finished")
-print("Total embedded chunks:", len(completed_ids))
+print(f"Finished! Database saved to {DB_DIR}")

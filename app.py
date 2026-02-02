@@ -1,7 +1,10 @@
-# app.py
-import os
-from itertools import cycle
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
+import os
+import chromadb
+from itertools import cycle
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,171 +17,91 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.retrievers import BaseRetriever
-
 from langchain_chroma import Chroma
 
-from chromadb import Client
-from chromadb.config import Settings
-
 # ──────────────────────────
-# ENV / TELEMETRY
+# CONFIG & PATHS
 # ──────────────────────────
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
-
-# ──────────────────────────
-# APP
-# ──────────────────────────
 app = FastAPI(title="AI Scriptural Counsellor")
+
+# Find chroma_db folder relative to this file
+current_dir = os.path.dirname(os.path.abspath(__file__))
+DB_DIR = os.path.join(current_dir, "chroma_db")
+COLLECTION_NAME = "devo_collection"
 
 # ──────────────────────────
 # CORS
 # ──────────────────────────
-origins = [
-    "http://localhost:3000",
-    "https://the-mustard-seed.vercel.app",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"], # Adjust for production security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ──────────────────────────
-# CONFIG
+# EMBEDDINGS & KEYS
 # ──────────────────────────
-DB_DIR = "/opt/render/project/src/chroma_db"
-COLLECTION_NAME = "langchain"
-
-# Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
 if not API_KEYS or API_KEYS == [""]:
     raise RuntimeError("GOOGLE_API_KEYS environment variable not set")
 
 key_cycle = cycle(API_KEYS)
 
-# ──────────────────────────
-# EMBEDDINGS
-# ──────────────────────────
 def get_embedder():
     return GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         google_api_key=next(key_cycle),
     )
 
-GOOGLE_API_KEY = API_KEYS[0]
-
 # ──────────────────────────
-# CHROMA CLIENT (VERSION SAFE)
+# VECTORSTORE INITIALIZATION
 # ──────────────────────────
-chroma_client = Client(
-    Settings(
-        persist_directory=DB_DIR,
-        anonymized_telemetry=False,
-    )
-)
-
-# ──────────────────────────
-# VECTORSTORE
-# ──────────────────────────
-embedder = get_embedder()
+# Initialize modern persistent client
+chroma_client = chromadb.PersistentClient(path=DB_DIR)
 
 vectorstore = Chroma(
     client=chroma_client,
     collection_name=COLLECTION_NAME,
-    embedding_function=embedder,
+    embedding_function=get_embedder(),
 )
 
-print(">>>>>>>><<<<< Loaded collection:", COLLECTION_NAME)
-
-# Startup sanity check
-try:
-    test_embedding = embedder.embed_query("dimension test")
-    print(
-        f"[STARTUP] Embedding dimension: {len(test_embedding)} "
-        f"(expected 768 for text-embedding-004)"
-    )
-except Exception as e:
-    print("[STARTUP ERROR] Embedder failed:", str(e))
+retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
 
 # ──────────────────────────
-# RETRIEVER
-# ──────────────────────────
-retriever: BaseRetriever = vectorstore.as_retriever(
-    search_type="similarity",
-    search_kwargs={"k": 2},
-)
-
-# ──────────────────────────
-# CONTEXT FORMATTER
+# RAG CHAIN
 # ──────────────────────────
 def format_docs(docs):
-    if not docs:
-        return "No devotional context found."
-
+    if not docs: return "No context found."
     return "\n\n".join(
-        f"Title: {doc.metadata.get('title', 'Unknown')}\n"
-        f"Date: {doc.metadata.get('date', 'Unknown')}\n"
-        f"Content:\n{doc.page_content}"
-        for doc in docs
+        f"Title: {d.metadata.get('title', 'Unknown')}\nContent: {d.page_content}"
+        for d in docs
     )
 
-# ──────────────────────────
-# PROMPT
-# ──────────────────────────
-prompt = ChatPromptTemplate.from_template(
-    """
-You are a Christian pastor and devotional guide.
+prompt = ChatPromptTemplate.from_template("""
+You are a Christian pastor. Use the context to answer the question.
+Context: {context}
+Question: {question}
+""")
 
-Use the following context to answer the question.
-If the context does not contain the answer, say you don't know.
-
-Return:
-1. Title(s) of devotional(s)
-2. Date(s) of release
-3. Answer to the question
-4. Relevant scripture references
-
-Context:
-{context}
-
-Question:
-{question}
-"""
-)
-
-# ──────────────────────────
-# LLM
-# ──────────────────────────
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    google_api_key=GOOGLE_API_KEY,
+    model="gemini-1.5-flash", # Updated to current stable model
+    google_api_key=API_KEYS[0],
 )
 
-# ──────────────────────────
-# CHAIN
-# ──────────────────────────
 chain = (
-    {
-        "context": retriever | RunnableLambda(format_docs),
-        "question": RunnablePassthrough(),
-    }
-    | prompt
-    | llm
-    | StrOutputParser()
+    {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
+    | prompt | llm | StrOutputParser()
 )
-
-# ──────────────────────────
-# API MODELS
-# ──────────────────────────
-class Question(BaseModel):
-    question: str
 
 # ──────────────────────────
 # ROUTES
 # ──────────────────────────
+class Question(BaseModel):
+    question: str
+
 @app.get("/")
 async def root():
     return {"status": "RAG Chat API running"}
@@ -189,40 +112,12 @@ async def chat(q: Question):
         result = chain.invoke(q.question)
         return {"answer": result}
     except Exception as e:
-        print("[CHAT ERROR]", str(e))
-        raise HTTPException(status_code=500, detail="RAG processing failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/debug-db")
 async def debug_db():
     try:
-        collection = chroma_client.get_collection(COLLECTION_NAME)
-        count = collection.count()
-
-        return {
-            "collection_name": COLLECTION_NAME,
-            "documents_in_db": count,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/debug-fs")
-async def debug_fs():
-    try:
-        cwd = os.getcwd()
-        files = os.listdir(cwd)
-
-        chroma_path = os.path.join(cwd, "chroma_db")
-        chroma_exists = os.path.exists(chroma_path)
-
-        chroma_files = []
-        if chroma_exists:
-            chroma_files = os.listdir(chroma_path)
-
-        return {
-            "cwd": cwd,
-            "root_files": files,
-            "chroma_db_exists": chroma_exists,
-            "chroma_db_files": chroma_files,
-        }
+        count = chroma_client.get_collection(COLLECTION_NAME).count()
+        return {"collection": COLLECTION_NAME, "count": count, "path": DB_DIR}
     except Exception as e:
         return {"error": str(e)}

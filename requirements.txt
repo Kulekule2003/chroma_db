@@ -11,7 +11,8 @@ langchain-text-splitters>=0.3.0,<0.4.0
 langchain-google-genai>=2.0.0,<3.0.0
 
 chromadb==0.5.3
-
+pysqlite3-binary
+pandas
 google-generativeai>=0.8.0,<0.9.0
 proto-plus==1.25.0
 protobuf==4.25.5
