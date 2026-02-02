@@ -204,3 +204,25 @@ async def debug_db():
         }
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/debug-fs")
+async def debug_fs():
+    try:
+        cwd = os.getcwd()
+        files = os.listdir(cwd)
+
+        chroma_path = os.path.join(cwd, "chroma_db")
+        chroma_exists = os.path.exists(chroma_path)
+
+        chroma_files = []
+        if chroma_exists:
+            chroma_files = os.listdir(chroma_path)
+
+        return {
+            "cwd": cwd,
+            "root_files": files,
+            "chroma_db_exists": chroma_exists,
+            "chroma_db_files": chroma_files,
+        }
+    except Exception as e:
+        return {"error": str(e)}
