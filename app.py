@@ -8,6 +8,7 @@ from itertools import cycle
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import subprocess
 
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
@@ -129,3 +130,18 @@ async def chat(q: Question):
         # Print the full error to Render logs
         print(f"CHAT ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/debug/ls")
+def list_files(path: str = "."):
+    # Returns a list of files in the specified directory
+    try:
+        files = os.listdir(path)
+        return {"directory": path, "content": files}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/debug/env")
+def show_env():
+    # Shows environment variables (Careful: hides secrets!)
+    return {k: v for k, v in os.environ.items() if "SECRET" not in k and "PASSWORD" not in k}
