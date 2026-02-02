@@ -1,13 +1,12 @@
-import chromadb
+from langchain_chroma import Chroma
+import os
 
-# Initialize the persistent client, specifying the same path used when creating collections
-# If using in-memory or a server, initialize the appropriate client (e.g., chromadb.HttpClient)
-client = chromadb.PersistentClient(path="./chroma_db") 
+DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
 
-# Retrieve a list of all collection objects
-collections = client.list_collections()
-
-# Extract and print the names
-print("Available collections:")
-for collection in collections:
-    print(f"* {collection.name}")
+# List all collections in the DB folder
+try:
+    # Initialize without specifying a collection first
+    temp_store = Chroma(persist_directory=DB_DIR)
+    print("Collections in DB:", temp_store.list_collections())
+except Exception as e:
+    print("Error reading DB:", e)

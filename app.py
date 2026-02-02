@@ -34,8 +34,11 @@ app.add_middleware(
 # ──────────────────────────
 # CONFIG
 # ──────────────────────────
-DB_DIR = "chroma_db"
-COLLECTION_NAME = "devo_collection"  # explicit name – helps consistency
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_DIR = os.path.join(BASE_DIR, "chroma_db")
+
+COLLECTION_NAME = "2c202c69-4129-4e4b-a2bc-6a416e7d09a2"  # explicit name – helps consistency
 
 # Load Google API keys from environment (comma-separated)
 API_KEYS = os.environ.get("GOOGLE_API_KEYS", "").split(",")
