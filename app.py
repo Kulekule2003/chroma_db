@@ -1,18 +1,14 @@
 import os
-import subprocess
+import csv
+import json
 from itertools import cycle
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import csv
-import json
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import (
-    ChatGoogleGenerativeAI,
-    GoogleGenerativeAIEmbeddings,
-)
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
@@ -22,25 +18,19 @@ from chromadb import Client
 from chromadb.config import Settings
 
 # ──────────────────────────
-# ENV
+# ENV / PATHS
 # ──────────────────────────
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-# ──────────────────────────
-# PATHS
-# ──────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join("/tmp", "chroma_db")  # Render writable dir
 CSV_PATH = os.path.join(BASE_DIR, "devo.csv")
 
 # ──────────────────────────
-# APP
+# FASTAPI APP
 # ──────────────────────────
 app = FastAPI(title="AI Scriptural Counsellor")
 
-# ──────────────────────────
-# CORS
-# ──────────────────────────
 origins = [
     "http://localhost:3000",
     "https://the-mustard-seed.vercel.app",
@@ -55,27 +45,22 @@ app.add_middleware(
 
 # ──────────────────────────
 # GOOGLE API KEYS
-# Last key is reserved for user queries
-# Use environment variable: GOOGLE_API_KEYS="KEY1,KEY2,...,USER_KEY"
+# Last key reserved for user queries
+# Set in Render: GOOGLE_API_KEYS="BUILD1,BUILD2,...,USER_KEY"
 # ──────────────────────────
 RAW_KEYS = os.environ.get("GOOGLE_API_KEYS", "")
 API_KEYS = [k.strip() for k in RAW_KEYS.split(",") if k.strip()]
-
 if len(API_KEYS) < 1:
     raise RuntimeError("GOOGLE_API_KEYS must contain at least one key")
 
 BUILD_KEYS = API_KEYS[:-1] if len(API_KEYS) > 1 else API_KEYS
 USER_KEY = API_KEYS[-1]
-
 build_key_cycle = cycle(BUILD_KEYS)
 
-# ──────────────────────────
-# EMBEDDINGS
-# ──────────────────────────
 def get_embedder():
     return GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
-        google_api_key=next(build_key_cycle),
+        google_api_key=next(build_key_cycle)
     )
 
 # ──────────────────────────
@@ -92,7 +77,7 @@ def format_docs(docs):
     )
 
 def rebuild_db_safe():
-    """Build the DB safely on Render using rotating API keys"""
+    """Build Chroma DB safely with rotating API keys"""
     print("⚠️ Chroma DB missing — attempting rebuild")
 
     if not os.path.exists(CSV_PATH):
@@ -133,14 +118,20 @@ def rebuild_db_safe():
 
         print(f"Loaded {len(documents)} docs, {len(chunks)} chunks")
 
-        # Create Chroma vectorstore
+        # Chroma client & collection
+        chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
+        try:
+            collection = chroma_client.get_collection("devotionals")
+        except:
+            collection = chroma_client.create_collection("devotionals")
+
         vectorstore = Chroma(
+            client=chroma_client,
             collection_name="devotionals",
-            persist_directory=DB_DIR,
             embedding_function=get_embedder()
         )
 
-        # Embedding loop with batch size and quota handling
+        # Embedding loop
         BATCH_SIZE = 50
         completed_ids = set()
         PROGRESS_FILE = os.path.join(BASE_DIR, "progress.json")
@@ -158,16 +149,16 @@ def rebuild_db_safe():
             if not to_add:
                 continue
             try:
-                print(f"Embedding batch {i} - {i+len(to_add)}")
+                print(f"Embedding batch {i}-{i+len(to_add)}")
                 vectorstore.add_documents(to_add)
                 for c in to_add:
                     completed_ids.add(c.metadata["chunk_id"])
                 save_progress()
             except Exception as e:
-                print("⚠️ Embedding batch failed, likely quota hit:", e)
+                print("⚠️ Embedding batch failed (quota issue?):", e)
                 break
 
-        print(f"✅ DB built safely with {vectorstore._collection.count()} documents")
+        print(f"✅ DB built safely with {collection.count()} documents")
         return True
 
     except Exception as e:
@@ -187,37 +178,29 @@ def startup():
     print(">>>>>>>><<<<< BUILD KEYS:", len(BUILD_KEYS))
     print(">>>>>>>><<<<< USER KEY RESERVED")
 
-    # Build DB if missing
+    # Build DB if missing or empty
     if not os.path.exists(DB_DIR) or not os.listdir(DB_DIR):
         rebuild_db_safe()
 
     # Chroma client
     chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
-
     collections = chroma_client.list_collections()
-    if not collections:
-        print("⚠️ No collections found — DB is empty")
-        collection_name = None
-    else:
-        collection_name = collections[0].name
-        print("Collections found:", [c.name for c in collections])
+    collection_name = collections[0].name if collections else None
 
-    # Vectorstore setup
-    embedder = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=USER_KEY)
     if collection_name:
-        vectorstore = Chroma(client=chroma_client, collection_name=collection_name, embedding_function=embedder)
+        vectorstore = Chroma(client=chroma_client, collection_name=collection_name,
+                             embedding_function=GoogleGenerativeAIEmbeddings(
+                                 model="models/text-embedding-004",
+                                 google_api_key=USER_KEY
+                             ))
         doc_count = chroma_client.get_collection(collection_name).count()
     else:
         vectorstore = None
         doc_count = 0
 
-    # Retriever
-    if vectorstore and doc_count > 0:
-        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 2})
-    else:
-        retriever = None
+    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 2}) if vectorstore and doc_count>0 else None
 
-    # LLM chain
+    # LLM
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=USER_KEY)
     prompt = ChatPromptTemplate.from_template("""
 You are a Christian pastor and devotional guide.
@@ -256,14 +239,11 @@ Question:
     print(">>>>>>>><<<<< RAG READY\n")
 
 # ──────────────────────────
-# API MODELS
+# API MODELS & ROUTES
 # ──────────────────────────
 class Question(BaseModel):
     question: str
 
-# ──────────────────────────
-# ROUTES
-# ──────────────────────────
 @app.get("/")
 async def root():
     return {"status": "RAG Chat API running", "user_key_reserved": True}
