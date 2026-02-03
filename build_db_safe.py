@@ -25,12 +25,7 @@ BATCH_SIZE = 50                        # number of chunks per batch
 # GOOGLE API KEYS
 # ======================
 API_KEYS = [
-    "AIzaSyCHvMYBKa59BJ9gHeMub7FRFS0sQMDhoio",
-    "AIzaSyBW7iBsamSX0b5DSb18g1ZeZ6tBSOAhku8",
-    "AIzaSyBq7FCSJXdD1gc5-my9iebIH0eFDwwyT40",
-    "AIzaSyBlz-ExdB6u3GPNYVUgbpkKZx7pSWr3HWk",
-    "AIzaSyCkEdJJVJZU1gNX0r8R08iB6MjYzYcc2-w",
-    "AIzaSyCel4FzVfiS1DMM-quYz8O8zLQqnnDB84E"
+    "AIza..."
 ]
 key_cycle = cycle(API_KEYS)
 

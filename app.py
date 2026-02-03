@@ -1,3 +1,4 @@
+# app.py
 import os
 import csv
 import json
@@ -6,35 +7,46 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
+)
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
-
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from chromadb import Client
 from chromadb.config import Settings
 
 # ──────────────────────────
-# ENV / PATHS
+# ENV
 # ──────────────────────────
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
+# ──────────────────────────
+# PATHS
+# ──────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_DIR = os.path.join("/tmp", "chroma_db")  # Render writable dir
+DB_DIR = os.path.join("/tmp", "chroma_db")  # Render ephemeral dir
 CSV_PATH = os.path.join(BASE_DIR, "devo.csv")
+PROGRESS_FILE = os.path.join(BASE_DIR, "progress.json")
 
 # ──────────────────────────
-# FASTAPI APP
+# APP
 # ──────────────────────────
 app = FastAPI(title="AI Scriptural Counsellor")
 
+# ──────────────────────────
+# CORS
+# ──────────────────────────
 origins = [
     "http://localhost:3000",
     "https://the-mustard-seed.vercel.app",
 ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -45,22 +57,23 @@ app.add_middleware(
 
 # ──────────────────────────
 # GOOGLE API KEYS
-# Last key reserved for user queries
-# Set in Render: GOOGLE_API_KEYS="BUILD1,BUILD2,...,USER_KEY"
+# Comma separated: KEY1,KEY2,...,LAST_KEY (user)
 # ──────────────────────────
 RAW_KEYS = os.environ.get("GOOGLE_API_KEYS", "")
 API_KEYS = [k.strip() for k in RAW_KEYS.split(",") if k.strip()]
+
 if len(API_KEYS) < 1:
     raise RuntimeError("GOOGLE_API_KEYS must contain at least one key")
 
 BUILD_KEYS = API_KEYS[:-1] if len(API_KEYS) > 1 else API_KEYS
 USER_KEY = API_KEYS[-1]
+
 build_key_cycle = cycle(BUILD_KEYS)
 
 def get_embedder():
     return GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
-        google_api_key=next(build_key_cycle)
+        google_api_key=next(build_key_cycle),
     )
 
 # ──────────────────────────
@@ -72,12 +85,15 @@ def format_docs(docs):
     return "\n\n".join(
         f"Title: {doc.metadata.get('title','Unknown')}\n"
         f"Date: {doc.metadata.get('date','Unknown')}\n"
+        f"Theme: {doc.metadata.get('theme','Unknown')}\n"
+        f"Scripture: {doc.metadata.get('scripture','Unknown')}\n"
+        f"Further Study: {doc.metadata.get('further_study','')}\n"
         f"Content:\n{doc.page_content}"
         for doc in docs
     )
 
 def rebuild_db_safe():
-    """Build Chroma DB safely with rotating API keys"""
+    """Build Chroma DB safely on Render, rotating build keys"""
     print("⚠️ Chroma DB missing — attempting rebuild")
 
     if not os.path.exists(CSV_PATH):
@@ -86,10 +102,10 @@ def rebuild_db_safe():
 
     try:
         # Load CSV
-        with open(CSV_PATH, "r", encoding="utf-8") as f:
+        documents = []
+        with open(CSV_PATH, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             reader.fieldnames = [h.strip() for h in reader.fieldnames]
-            documents = []
             for idx, row in enumerate(reader):
                 content = row.get("Body", "").strip()
                 if len(content) < 20:
@@ -97,12 +113,13 @@ def rebuild_db_safe():
                 doc = Document(
                     page_content=content,
                     metadata={
-                        "title": row.get("Title","").strip(),
-                        "date": row.get("Date","").strip(),
-                        "theme": row.get("Theme","").strip(),
-                        "scripture": row.get("Theme Scripture","").strip(),
-                        "row": idx
-                    }
+                        "title": row.get("Title", "").strip(),
+                        "date": row.get("Date", "").strip(),
+                        "theme": row.get("Theme", "").strip(),
+                        "scripture": row.get("Theme Scripture", "").strip(),
+                        "further_study": row.get("Further Study", "").strip(),
+                        "row": idx,
+                    },
                 )
                 documents.append(doc)
 
@@ -110,7 +127,7 @@ def rebuild_db_safe():
             print("❌ No documents loaded from CSV")
             return False
 
-        # Chunking
+        # Chunk documents
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=20)
         chunks = splitter.split_documents(documents)
         for i, chunk in enumerate(chunks):
@@ -118,23 +135,16 @@ def rebuild_db_safe():
 
         print(f"Loaded {len(documents)} docs, {len(chunks)} chunks")
 
-        # Chroma client & collection
+        # Chroma client
         chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
         try:
             collection = chroma_client.get_collection("devotionals")
         except:
             collection = chroma_client.create_collection("devotionals")
 
-        vectorstore = Chroma(
-            client=chroma_client,
-            collection_name="devotionals",
-            embedding_function=get_embedder()
-        )
-
         # Embedding loop
         BATCH_SIZE = 50
         completed_ids = set()
-        PROGRESS_FILE = os.path.join(BASE_DIR, "progress.json")
         if os.path.exists(PROGRESS_FILE):
             with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
                 completed_ids = set(json.load(f))
@@ -148,15 +158,28 @@ def rebuild_db_safe():
             to_add = [c for c in batch if c.metadata["chunk_id"] not in completed_ids]
             if not to_add:
                 continue
-            try:
-                print(f"Embedding batch {i}-{i+len(to_add)}")
-                vectorstore.add_documents(to_add)
-                for c in to_add:
-                    completed_ids.add(c.metadata["chunk_id"])
-                save_progress()
-            except Exception as e:
-                print("⚠️ Embedding batch failed (quota issue?):", e)
-                break
+
+            success = False
+            for _ in range(len(BUILD_KEYS)):
+                try:
+                    vectorstore = Chroma(
+                        client=chroma_client,
+                        collection_name="devotionals",
+                        embedding_function=get_embedder()
+                    )
+                    print(f"Embedding batch {i}-{i+len(to_add)} using build key")
+                    vectorstore.add_documents(to_add)
+                    for c in to_add:
+                        completed_ids.add(c.metadata["chunk_id"])
+                    save_progress()
+                    success = True
+                    break
+                except Exception as e:
+                    print("⚠️ Embedding batch failed with current key:", e)
+                    continue
+
+            if not success:
+                print("⚠️ Batch skipped due to all build keys failing.")
 
         print(f"✅ DB built safely with {collection.count()} documents")
         return True
@@ -178,31 +201,40 @@ def startup():
     print(">>>>>>>><<<<< BUILD KEYS:", len(BUILD_KEYS))
     print(">>>>>>>><<<<< USER KEY RESERVED")
 
-    # Build DB if missing or empty
+    # Build DB if missing
     if not os.path.exists(DB_DIR) or not os.listdir(DB_DIR):
         rebuild_db_safe()
 
     # Chroma client
     chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
-    collections = chroma_client.list_collections()
-    collection_name = collections[0].name if collections else None
 
+    # Check collections
+    collections = chroma_client.list_collections()
+    if not collections:
+        print("⚠️ No collections found — running in EMPTY DB MODE")
+        collection_name = None
+    else:
+        collection_name = collections[0].name
+        print(">>>>>>>><<<<< Using collection:", collection_name)
+
+    # Vectorstore setup
     if collection_name:
-        vectorstore = Chroma(client=chroma_client, collection_name=collection_name,
-                             embedding_function=GoogleGenerativeAIEmbeddings(
-                                 model="models/text-embedding-004",
-                                 google_api_key=USER_KEY
-                             ))
+        vectorstore = Chroma(client=chroma_client, collection_name=collection_name, embedding_function=get_embedder())
         doc_count = chroma_client.get_collection(collection_name).count()
+        print(">>>>>>>><<<<< Documents in DB:", doc_count)
     else:
         vectorstore = None
         doc_count = 0
 
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 2}) if vectorstore and doc_count>0 else None
+    # Retriever
+    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k":2}) if vectorstore and doc_count>0 else None
 
-    # LLM
+    # LLM — use reserved user key
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=USER_KEY)
-    prompt = ChatPromptTemplate.from_template("""
+
+    # Prompt
+    prompt = ChatPromptTemplate.from_template(
+        """
 You are a Christian pastor and devotional guide.
 
 Use the following context to answer the question.
@@ -219,8 +251,10 @@ Context:
 
 Question:
 {question}
-""")
+"""
+    )
 
+    # Chain
     def safe_retrieve(q):
         if not retriever:
             return "Devotional database is unavailable or empty."
@@ -239,14 +273,17 @@ Question:
     print(">>>>>>>><<<<< RAG READY\n")
 
 # ──────────────────────────
-# API MODELS & ROUTES
+# API MODELS
 # ──────────────────────────
 class Question(BaseModel):
     question: str
 
+# ──────────────────────────
+# ROUTES
+# ──────────────────────────
 @app.get("/")
 async def root():
-    return {"status": "RAG Chat API running", "user_key_reserved": True}
+    return {"status":"RAG Chat API running", "build_keys":len(BUILD_KEYS), "user_key_reserved":True}
 
 @app.post("/chat")
 async def chat(q: Question):
