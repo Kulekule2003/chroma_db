@@ -5,31 +5,33 @@ sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import os
 import json
 from itertools import cycle
-
-from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_chroma import Chroma
+
+import csv
 
 # ======================
 # CONFIG
 # ======================
-CSV_FILE = "devo.csv"
-DB_DIR = "./chroma_db"
-COLLECTION_NAME = "devo_collection"
-PROGRESS_FILE = "progress.json"
-BATCH_SIZE = 50 
+CSV_FILE = "devo.csv"                  # your CSV file
+DB_DIR = "./chroma_db"                 # directory to store Chroma DB
+COLLECTION_NAME = "devo_collection"   # collection name in Chroma
+PROGRESS_FILE = "progress.json"        # tracks embedded chunks
+BATCH_SIZE = 50                        # number of chunks per batch
 
-# Replace with your actual keys locally
+# ======================
+# GOOGLE API KEYS
+# ======================
 API_KEYS = [
-   "AIzaSyAoCHHJgIbjJwrTAtyLnm2hQJIBd5XP4Ig",
-    "AIzaSyBu_TjtJMx1Y5BIyUtqb_kD8Ur99tT5VNo",
+    "AIzaSyCHvMYBKa59BJ9gHeMub7FRFS0sQMDhoio",
+    "AIzaSyBW7iBsamSX0b5DSb18g1ZeZ6tBSOAhku8",
     "AIzaSyBq7FCSJXdD1gc5-my9iebIH0eFDwwyT40",
     "AIzaSyBlz-ExdB6u3GPNYVUgbpkKZx7pSWr3HWk",
     "AIzaSyCkEdJJVJZU1gNX0r8R08iB6MjYzYcc2-w",
     "AIzaSyCel4FzVfiS1DMM-quYz8O8zLQqnnDB84E"
 ]
-
 key_cycle = cycle(API_KEYS)
 
 def get_embedder():
@@ -49,31 +51,34 @@ else:
     completed_ids = set()
 
 # ======================
-# LOAD CSV SAFELY
+# LOAD CSV
 # ======================
+if not os.path.exists(CSV_FILE):
+    raise FileNotFoundError(f"{CSV_FILE} not found")
+
 print("Loading CSV...")
 documents = []
 
-if not os.path.exists(CSV_FILE):
-    raise FileNotFoundError(f"Could not find {CSV_FILE}")
+with open(CSV_FILE, "r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    reader.fieldnames = [h.strip() for h in reader.fieldnames]  # remove spaces
+    for idx, row in enumerate(reader):
+        content = row.get("Body", "").strip()
+        if len(content) < 20:
+            continue  # skip very short entries
+        doc = Document(
+            page_content=content,
+            metadata={
+                "title": row.get("Title", "").strip(),
+                "date": row.get("Date", "").strip(),
+                "theme": row.get("Theme", "").strip(),
+                "scripture": row.get("Theme Scripture", "").strip(),
+                "row": idx
+            }
+        )
+        documents.append(doc)
 
-with open(CSV_FILE, "rb") as f:
-    raw = f.read()
-
-try:
-    text = raw.decode("utf-8")
-except UnicodeDecodeError:
-    text = raw.decode("latin-1")
-
-lines = text.splitlines()
-for idx, line in enumerate(lines):
-    row_text = line.strip()
-    if len(row_text) < 20:
-        continue
-    doc = Document(page_content=row_text, metadata={"row": idx})
-    documents.append(doc)
-
-print("Total rows loaded:", len(documents))
+print(f"Total documents loaded: {len(documents)}")
 
 # ======================
 # CHUNKING
@@ -84,8 +89,10 @@ chunks = splitter.split_documents(documents)
 for i, chunk in enumerate(chunks):
     chunk.metadata["chunk_id"] = f"chunk_{i}"
 
+print(f"Total chunks created: {len(chunks)}")
+
 # ======================
-# CREATE DB
+# CREATE VECTORSTORE
 # ======================
 vectorstore = Chroma(
     collection_name=COLLECTION_NAME,
@@ -93,6 +100,9 @@ vectorstore = Chroma(
     embedding_function=get_embedder()
 )
 
+# ======================
+# HELPER: save progress
+# ======================
 def save_progress():
     with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(completed_ids), f)
@@ -114,7 +124,8 @@ for i in range(0, len(chunks), BATCH_SIZE):
             completed_ids.add(c.metadata["chunk_id"])
         save_progress()
     except Exception as e:
-        print("Error:", e)
+        print("Error during embedding:", e)
+        print("Stopping to avoid API quota issues.")
         break
 
-print(f"Finished! Database saved to {DB_DIR}")
+print(f"✅ Finished! Database saved to {DB_DIR}")
