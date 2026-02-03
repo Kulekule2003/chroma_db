@@ -12,7 +12,7 @@ import json
 import warnings
 import shutil
 from itertools import cycle
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -184,9 +184,12 @@ def rebuild_db_safe():
                     persist_directory=DB_DIR,
                     collection_name="devotionals",
                 )
-                
-                # Explicitly persist
-                vectorstore.persist()
+
+                # Explicitly persist when supported (older langchain-chroma)
+                if hasattr(vectorstore, "persist"):
+                    vectorstore.persist()
+                else:
+                    print("ℹ️ Chroma instance has no 'persist' method; assuming auto-persistence.")
                 
                 success = True
                 print(f"✅ DB created successfully with key ending in ...{key_suffix}")
@@ -431,6 +434,12 @@ async def root():
         }
     except Exception as e:
         return {"status": "running", "error": str(e)}
+
+
+@app.head("/")
+async def root_head():
+    """HEAD handler for platform health checks (e.g. Render)."""
+    return Response(status_code=200)
 
 @app.post("/chat")
 async def chat(q: Question):
