@@ -1,4 +1,11 @@
 # app.py
+"""FastAPI entrypoint for Render deployment."""
+
+# Ensure Chroma uses bundled SQLite on hosts like Render
+__import__("pysqlite3")  # type: ignore[import-not-found]
+import sys
+sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+
 import os
 import csv
 import json
@@ -66,12 +73,21 @@ RAW_KEYS = os.environ.get("GOOGLE_API_KEYS", "")
 API_KEYS = [k.strip() for k in RAW_KEYS.split(",") if k.strip()]
 
 if len(API_KEYS) < 1:
-    raise RuntimeError("GOOGLE_API_KEYS must contain at least one key")
+    raise RuntimeError(
+        "Environment variable GOOGLE_API_KEYS must contain at least one key "
+        "(comma separated; last key is reserved for user traffic)."
+    )
 
 BUILD_KEYS = API_KEYS[:-1] if len(API_KEYS) > 1 else API_KEYS
 USER_KEY = API_KEYS[-1]
 
-build_key_cycle = cycle(BUILD_KEYS)
+build_key_cycle = cycle(BUILD_KEYS or [USER_KEY])
+
+# Globals initialised safely so routes don't crash before startup
+chroma_client = None
+vectorstore = None
+retriever: BaseRetriever | None = None  # type: ignore[valid-type]
+chain = None
 
 def get_embedder():
     """Get embedding function with next build key"""
@@ -420,6 +436,11 @@ async def root():
 async def chat(q: Question):
     """Main chat endpoint"""
     try:
+        if chain is None:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG system is not initialized yet. Please try again shortly.",
+            )
         print(f"💬 Chat request: '{q.question[:100]}...'")
         result = chain.invoke(q.question)
         return {"answer": result}
@@ -451,11 +472,16 @@ async def debug_db():
 async def health():
     """Health check endpoint"""
     try:
+        if chroma_client is None:
+            return {
+                "status": "unhealthy",
+                "reason": "chroma_client not initialized",
+            }, 503
+
         doc_count = 0
-        if chroma_client:
-            collections = chroma_client.list_collections()
-            if collections:
-                doc_count = chroma_client.get_collection(collections[0].name).count()
+        collections = chroma_client.list_collections()
+        if collections:
+            doc_count = chroma_client.get_collection(collections[0].name).count()
         
         return {
             "status": "healthy" if doc_count > 0 else "degraded",
