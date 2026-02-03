@@ -28,7 +28,8 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 # ──────────────────────────
 # PATHS
 # ──────────────────────────
-BASE_DIR = os.getenv("RENDER_PROJECT_DIR", os.getcwd())
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 DB_DIR = os.path.join(BASE_DIR, "chroma_db")
 CSV_PATH = os.path.join(BASE_DIR, "devo.csv")
 BUILD_SCRIPT = os.path.join(BASE_DIR, "build_db_safe.py")
