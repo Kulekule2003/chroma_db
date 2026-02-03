@@ -2,6 +2,8 @@
 import os
 import csv
 import json
+import warnings
+import shutil
 from itertools import cycle
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,8 +24,9 @@ from chromadb import Client
 from chromadb.config import Settings
 
 # ──────────────────────────
-# ENV
+# CONFIGURATION
 # ──────────────────────────
+warnings.filterwarnings("ignore", message=".*telemetry.*")
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 # ──────────────────────────
@@ -71,6 +74,7 @@ USER_KEY = API_KEYS[-1]
 build_key_cycle = cycle(BUILD_KEYS)
 
 def get_embedder():
+    """Get embedding function with next build key"""
     return GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         google_api_key=next(build_key_cycle),
@@ -80,6 +84,7 @@ def get_embedder():
 # HELPERS
 # ──────────────────────────
 def format_docs(docs):
+    """Format retrieved documents for context"""
     if not docs:
         return "No devotional context found in database."
     return "\n\n".join(
@@ -101,7 +106,13 @@ def rebuild_db_safe():
         return False
 
     try:
-        # Load CSV
+        # Clean existing DB directory to avoid conflicts
+        if os.path.exists(DB_DIR):
+            print(f"Cleaning existing DB directory: {DB_DIR}")
+            shutil.rmtree(DB_DIR)
+        os.makedirs(DB_DIR, exist_ok=True)
+
+        # Load CSV documents
         documents = []
         with open(CSV_PATH, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
@@ -133,106 +144,192 @@ def rebuild_db_safe():
         for i, chunk in enumerate(chunks):
             chunk.metadata["chunk_id"] = f"chunk_{i}"
 
-        print(f"Loaded {len(documents)} docs, {len(chunks)} chunks")
+        print(f"✅ Loaded {len(documents)} docs, {len(chunks)} chunks")
 
-        # Chroma client
-        chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
-        try:
-            collection = chroma_client.get_collection("devotionals")
-        except:
-            collection = chroma_client.create_collection("devotionals")
-
-        # Embedding loop
-        BATCH_SIZE = 50
-        completed_ids = set()
-        if os.path.exists(PROGRESS_FILE):
-            with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-                completed_ids = set(json.load(f))
-
-        def save_progress():
-            with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
-                json.dump(list(completed_ids), f)
-
-        for i in range(0, len(chunks), BATCH_SIZE):
-            batch = chunks[i:i+BATCH_SIZE]
-            to_add = [c for c in batch if c.metadata["chunk_id"] not in completed_ids]
-            if not to_add:
+        # Try each build key until one works
+        vectorstore = None
+        success = False
+        
+        for build_key in BUILD_KEYS:
+            try:
+                key_suffix = build_key[-8:] if len(build_key) > 8 else build_key
+                print(f"🔄 Attempting to create vectorstore with key ending in ...{key_suffix}")
+                
+                # Create embeddings function with current key
+                embedder = GoogleGenerativeAIEmbeddings(
+                    model="models/text-embedding-004",
+                    google_api_key=build_key,
+                )
+                
+                # Create vectorstore directly (Chroma handles persistence)
+                vectorstore = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=embedder,
+                    persist_directory=DB_DIR,
+                    collection_name="devotionals",
+                )
+                
+                # Explicitly persist
+                vectorstore.persist()
+                
+                success = True
+                print(f"✅ DB created successfully with key ending in ...{key_suffix}")
+                break
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "quota" in error_msg.lower() or "limit" in error_msg.lower():
+                    print(f"⛔ Key ...{key_suffix} quota exceeded, trying next")
+                else:
+                    print(f"⚠️ Key ...{key_suffix} failed: {error_msg[:100]}")
                 continue
-
-            success = False
-            for _ in range(len(BUILD_KEYS)):
-                try:
-                    vectorstore = Chroma(
-                        client=chroma_client,
-                        collection_name="devotionals",
-                        embedding_function=get_embedder()
-                    )
-                    print(f"Embedding batch {i}-{i+len(to_add)} using build key")
-                    vectorstore.add_documents(to_add)
-                    for c in to_add:
-                        completed_ids.add(c.metadata["chunk_id"])
-                    save_progress()
-                    success = True
-                    break
-                except Exception as e:
-                    print("⚠️ Embedding batch failed with current key:", e)
-                    continue
-
-            if not success:
-                print("⚠️ Batch skipped due to all build keys failing.")
-
-        print(f"✅ DB built safely with {collection.count()} documents")
-        return True
+        
+        if not success:
+            print("❌ All build keys failed")
+            return False
+        
+        # Verify the collection was created
+        try:
+            client = Client(Settings(persist_directory=DB_DIR))
+            collection = client.get_collection("devotionals")
+            count = collection.count()
+            print(f"✅ DB verification: {count} documents in collection")
+            
+            # Save progress for future reference
+            progress_data = {
+                "total_documents": len(documents),
+                "total_chunks": len(chunks),
+                "collection_count": count,
+                "rebuild_time": json.dumps(str(os.path.getmtime(CSV_PATH)))
+            }
+            with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+                json.dump(progress_data, f)
+                
+            return count > 0
+            
+        except Exception as e:
+            print(f"❌ DB verification failed: {e}")
+            return False
 
     except Exception as e:
-        print("❌ Failed to rebuild DB:", e)
+        print(f"❌ Failed to rebuild DB: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # ──────────────────────────
 # STARTUP
 # ──────────────────────────
 @app.on_event("startup")
-def startup():
+async def startup():
+    """Initialize RAG system on startup"""
     global chroma_client, vectorstore, retriever, chain
 
-    print("\n>>>>>>>><<<<< RAG STARTUP")
-    print(">>>>>>>><<<<< BASE DIR:", BASE_DIR)
-    print(">>>>>>>><<<<< DB PATH:", DB_DIR)
-    print(">>>>>>>><<<<< BUILD KEYS:", len(BUILD_KEYS))
-    print(">>>>>>>><<<<< USER KEY RESERVED")
-
-    # Build DB if missing
-    if not os.path.exists(DB_DIR) or not os.listdir(DB_DIR):
-        rebuild_db_safe()
-
-    # Chroma client
-    chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
-
-    # Check collections
-    collections = chroma_client.list_collections()
-    if not collections:
-        print("⚠️ No collections found — running in EMPTY DB MODE")
-        collection_name = None
+    print("\n" + "="*60)
+    print("RAG STARTUP INITIALIZED")
+    print("="*60)
+    print(f"BASE DIR: {BASE_DIR}")
+    print(f"DB PATH: {DB_DIR}")
+    print(f"BUILD KEYS: {len(BUILD_KEYS)}")
+    print(f"USER KEY RESERVED: True")
+    
+    # Check if DB needs rebuilding
+    needs_rebuild = False
+    chroma_client = None
+    
+    try:
+        chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
+        collections = chroma_client.list_collections()
+        
+        if not collections:
+            print("⚠️ No collections found in DB")
+            needs_rebuild = True
+        else:
+            collection_name = collections[0].name
+            doc_count = chroma_client.get_collection(collection_name).count()
+            print(f"📊 Found collection '{collection_name}' with {doc_count} documents")
+            
+            if doc_count == 0:
+                print("⚠️ Collection exists but is empty")
+                needs_rebuild = True
+            elif doc_count < 100:  # Arbitrary threshold
+                print(f"⚠️ Low document count ({doc_count}), checking CSV...")
+                if os.path.exists(CSV_PATH):
+                    # Quick check if CSV has more content
+                    with open(CSV_PATH, 'r', encoding='utf-8-sig') as f:
+                        reader = csv.DictReader(f)
+                        csv_rows = sum(1 for _ in reader)
+                        if csv_rows > doc_count:
+                            print(f"⚠️ CSV has {csv_rows} rows but DB has {doc_count} docs")
+                            needs_rebuild = True
+                
+    except Exception as e:
+        print(f"⚠️ Could not connect to DB: {e}")
+        needs_rebuild = True
+    
+    # Rebuild if needed
+    if needs_rebuild:
+        print("🔨 Initiating database rebuild...")
+        success = rebuild_db_safe()
+        if not success:
+            print("❌ Database rebuild failed - starting with limited functionality")
     else:
-        collection_name = collections[0].name
-        print(">>>>>>>><<<<< Using collection:", collection_name)
-
-    # Vectorstore setup
-    if collection_name:
-        vectorstore = Chroma(client=chroma_client, collection_name=collection_name, embedding_function=get_embedder())
-        doc_count = chroma_client.get_collection(collection_name).count()
-        print(">>>>>>>><<<<< Documents in DB:", doc_count)
-    else:
+        print("✅ Database appears healthy")
+    
+    # Re-initialize client after possible rebuild
+    try:
+        chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
+        collections = chroma_client.list_collections()
+        
+        if not collections:
+            print("⚠️ Running in EMPTY MODE - no vectorstore available")
+            vectorstore = None
+            retriever = None
+            doc_count = 0
+        else:
+            collection_name = collections[0].name
+            doc_count = chroma_client.get_collection(collection_name).count()
+            
+            # Initialize vectorstore with USER key for queries
+            embedder = GoogleGenerativeAIEmbeddings(
+                model="models/text-embedding-004",
+                google_api_key=USER_KEY,
+            )
+            
+            vectorstore = Chroma(
+                client=chroma_client,
+                collection_name=collection_name,
+                embedding_function=embedder,
+                persist_directory=DB_DIR,
+            )
+            
+            print(f"✅ Vectorstore initialized with {doc_count} documents")
+            
+    except Exception as e:
+        print(f"❌ Failed to initialize vectorstore: {e}")
         vectorstore = None
+        retriever = None
         doc_count = 0
-
-    # Retriever
-    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k":2}) if vectorstore and doc_count>0 else None
-
-    # LLM — use reserved user key
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=USER_KEY)
-
-    # Prompt
+    
+    # Retriever setup
+    if vectorstore and doc_count > 0:
+        retriever = vectorstore.as_retriever(
+            search_type="similarity", 
+            search_kwargs={"k": 3}
+        )
+        print(f"✅ Retriever ready (k=3)")
+    else:
+        retriever = None
+        print("⚠️ No retriever available - using fallback responses")
+    
+    # LLM setup with USER key
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash", 
+        google_api_key=USER_KEY,
+        temperature=0.3
+    )
+    
+    # Prompt template
     prompt = ChatPromptTemplate.from_template(
         """
 You are a Christian pastor and devotional guide.
@@ -253,13 +350,20 @@ Question:
 {question}
 """
     )
-
-    # Chain
-    def safe_retrieve(q):
+    
+    # Safe retrieval function
+    def safe_retrieve(question):
         if not retriever:
-            return "Devotional database is unavailable or empty."
-        return retriever.invoke(q)
-
+            return []
+        try:
+            results = retriever.invoke(question)
+            print(f"🔍 Retrieved {len(results)} documents for query: '{question[:50]}...'")
+            return results
+        except Exception as e:
+            print(f"❌ Retrieval error: {e}")
+            return []
+    
+    # Chain construction
     chain = (
         {
             "context": RunnableLambda(safe_retrieve) | RunnableLambda(format_docs),
@@ -269,8 +373,10 @@ Question:
         | llm
         | StrOutputParser()
     )
-
-    print(">>>>>>>><<<<< RAG READY\n")
+    
+    print("="*60)
+    print("✅ RAG SYSTEM READY")
+    print("="*60 + "\n")
 
 # ──────────────────────────
 # API MODELS
@@ -283,27 +389,136 @@ class Question(BaseModel):
 # ──────────────────────────
 @app.get("/")
 async def root():
-    return {"status":"RAG Chat API running", "build_keys":len(BUILD_KEYS), "user_key_reserved":True}
+    """Root endpoint"""
+    try:
+        doc_count = 0
+        if chroma_client:
+            collections = chroma_client.list_collections()
+            if collections:
+                doc_count = chroma_client.get_collection(collections[0].name).count()
+        
+        return {
+            "status": "RAG Chat API running",
+            "version": "1.0.0",
+            "database": {
+                "documents": doc_count,
+                "path": DB_DIR,
+                "exists": os.path.exists(DB_DIR)
+            },
+            "keys": {
+                "build_keys": len(BUILD_KEYS),
+                "user_key_reserved": True
+            }
+        }
+    except Exception as e:
+        return {"status": "running", "error": str(e)}
 
 @app.post("/chat")
 async def chat(q: Question):
+    """Main chat endpoint"""
     try:
+        print(f"💬 Chat request: '{q.question[:100]}...'")
         result = chain.invoke(q.question)
         return {"answer": result}
     except Exception as e:
-        print("[CHAT ERROR]", str(e))
+        print(f"[CHAT ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/debug-db")
 async def debug_db():
+    """Debug database endpoint"""
     try:
         collections = chroma_client.list_collections()
         return {
             "db_path": DB_DIR,
+            "exists": os.path.exists(DB_DIR),
             "collections": [
-                {"name": c.name, "documents": chroma_client.get_collection(c.name).count()}
+                {
+                    "name": c.name, 
+                    "documents": chroma_client.get_collection(c.name).count(),
+                    "metadata": chroma_client.get_collection(c.name).metadata
+                }
                 for c in collections
             ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    try:
+        doc_count = 0
+        if chroma_client:
+            collections = chroma_client.list_collections()
+            if collections:
+                doc_count = chroma_client.get_collection(collections[0].name).count()
+        
+        return {
+            "status": "healthy" if doc_count > 0 else "degraded",
+            "database": {
+                "documents": doc_count,
+                "collections": len(chroma_client.list_collections()) if chroma_client else 0
+            },
+            "timestamp": json.dumps(str(os.path.getmtime(__file__) if os.path.exists(__file__) else 0))
+        }
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}, 503
+
+@app.get("/debug-collection")
+async def debug_collection():
+    """Detailed collection inspection"""
+    try:
+        if not chroma_client:
+            return {"error": "Chroma client not initialized"}
+            
+        collections = chroma_client.list_collections()
+        result = {
+            "db_path": DB_DIR,
+            "exists": os.path.exists(DB_DIR),
+            "collections_count": len(collections),
+            "build_keys_count": len(BUILD_KEYS),
+            "csv_exists": os.path.exists(CSV_PATH)
+        }
+        
+        for collection in collections:
+            coll = chroma_client.get_collection(collection.name)
+            result[collection.name] = {
+                "count": coll.count(),
+                "metadata": coll.metadata,
+                "sample_ids": coll.get(limit=2)["ids"] if coll.count() > 0 else []
+            }
+        
+        # Add CSV info
+        if os.path.exists(CSV_PATH):
+            with open(CSV_PATH, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                csv_rows = sum(1 for _ in reader)
+                result["csv_rows"] = csv_rows
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/reset-db")
+async def reset_db():
+    """Force reset database (use with caution)"""
+    try:
+        if os.path.exists(DB_DIR):
+            shutil.rmtree(DB_DIR)
+            print(f"🗑️ Removed DB directory: {DB_DIR}")
+        
+        if os.path.exists(PROGRESS_FILE):
+            os.remove(PROGRESS_FILE)
+            print(f"🗑️ Removed progress file: {PROGRESS_FILE}")
+        
+        # Trigger rebuild on next request
+        global needs_rebuild
+        needs_rebuild = True
+        
+        return {
+            "status": "Database reset initiated",
+            "next_steps": "Restart the application or wait for auto-rebuild"
         }
     except Exception as e:
         return {"error": str(e)}
