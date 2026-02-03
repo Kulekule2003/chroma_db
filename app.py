@@ -207,27 +207,27 @@ def rebuild_db_safe():
             print("❌ All build keys failed")
             return False
         
-        # Verify the collection was created
+        # Basic verification using the created vectorstore
         try:
-            client = Client(Settings(persist_directory=DB_DIR))
-            collection = client.get_collection("devotionals")
-            count = collection.count()
-            print(f"✅ DB verification: {count} documents in collection")
-            
+            count = vectorstore._collection.count()  # type: ignore[attr-defined]
+            print(f"✅ DB verification via vectorstore: {count} documents in collection")
+
             # Save progress for future reference
             progress_data = {
                 "total_documents": len(documents),
                 "total_chunks": len(chunks),
                 "collection_count": count,
-                "rebuild_time": json.dumps(str(os.path.getmtime(CSV_PATH)))
+                "rebuild_time": json.dumps(str(os.path.getmtime(CSV_PATH))),
             }
             with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
                 json.dump(progress_data, f)
-                
+
             return count > 0
-            
+
         except Exception as e:
-            print(f"❌ DB verification failed: {e}")
+            print(f"❌ DB verification via vectorstore failed: {e}")
+            # Even if verification fails, we at least tried to build;
+            # let startup logic decide how to proceed.
             return False
 
     except Exception as e:
@@ -252,78 +252,41 @@ def startup():
     print(f"BUILD KEYS: {len(BUILD_KEYS)}")
     print(f"USER KEY RESERVED: True")
     
-    # Check if DB needs rebuilding
-    needs_rebuild = False
-    chroma_client = None
-    
+    # Always attempt a rebuild on startup; DB is ephemeral on Render (/tmp)
+    print("🔨 Initiating database rebuild (Render /tmp is ephemeral)...")
+    success = rebuild_db_safe()
+    if not success:
+        print("❌ Database rebuild may have failed - continuing with limited functionality")
+
+    # Initialize Chroma client (for debug endpoints only)
     try:
         chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
-        collections = chroma_client.list_collections()
-        
-        if not collections:
-            print("⚠️ No collections found in DB")
-            needs_rebuild = True
-        else:
-            collection_name = collections[0].name
-            doc_count = chroma_client.get_collection(collection_name).count()
-            print(f"📊 Found collection '{collection_name}' with {doc_count} documents")
-            
-            if doc_count == 0:
-                print("⚠️ Collection exists but is empty")
-                needs_rebuild = True
-            elif doc_count < 100:  # Arbitrary threshold
-                print(f"⚠️ Low document count ({doc_count}), checking CSV...")
-                if os.path.exists(CSV_PATH):
-                    # Quick check if CSV has more content
-                    with open(CSV_PATH, 'r', encoding='utf-8-sig') as f:
-                        reader = csv.DictReader(f)
-                        csv_rows = sum(1 for _ in reader)
-                        if csv_rows > doc_count:
-                            print(f"⚠️ CSV has {csv_rows} rows but DB has {doc_count} docs")
-                            needs_rebuild = True
-                
     except Exception as e:
-        print(f"⚠️ Could not connect to DB: {e}")
-        needs_rebuild = True
-    
-    # Rebuild if needed
-    if needs_rebuild:
-        print("🔨 Initiating database rebuild...")
-        success = rebuild_db_safe()
-        if not success:
-            print("❌ Database rebuild failed - starting with limited functionality")
-    else:
-        print("✅ Database appears healthy")
-    
-    # Re-initialize client after possible rebuild
+        print(f"⚠️ Could not create Chroma client: {e}")
+        chroma_client = None
+
+    # Initialize vectorstore directly using known collection name
     try:
-        chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
-        collections = chroma_client.list_collections()
-        
-        if not collections:
-            print("⚠️ Running in EMPTY MODE - no vectorstore available")
-            vectorstore = None
-            retriever = None
+        embedder = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-004",
+            google_api_key=USER_KEY,
+        )
+
+        vectorstore = Chroma(
+            collection_name="devotionals",
+            embedding_function=embedder,
+            persist_directory=DB_DIR,
+        )
+
+        # Try to infer document count for logging
+        try:
+            doc_count = vectorstore._collection.count()  # type: ignore[attr-defined]
+        except Exception as inner_e:
+            print(f"⚠️ Could not get document count from vectorstore: {inner_e}")
             doc_count = 0
-        else:
-            collection_name = collections[0].name
-            doc_count = chroma_client.get_collection(collection_name).count()
-            
-            # Initialize vectorstore with USER key for queries
-            embedder = GoogleGenerativeAIEmbeddings(
-                model="models/text-embedding-004",
-                google_api_key=USER_KEY,
-            )
-            
-            vectorstore = Chroma(
-                client=chroma_client,
-                collection_name=collection_name,
-                embedding_function=embedder,
-                persist_directory=DB_DIR,
-            )
-            
-            print(f"✅ Vectorstore initialized with {doc_count} documents")
-            
+
+        print(f"✅ Vectorstore initialized (devotionals) with {doc_count} documents")
+
     except Exception as e:
         print(f"❌ Failed to initialize vectorstore: {e}")
         vectorstore = None
@@ -414,10 +377,11 @@ async def root():
     """Root endpoint"""
     try:
         doc_count = 0
-        if chroma_client:
-            collections = chroma_client.list_collections()
-            if collections:
-                doc_count = chroma_client.get_collection(collections[0].name).count()
+        if vectorstore is not None:
+            try:
+                doc_count = vectorstore._collection.count()  # type: ignore[attr-defined]
+            except Exception:
+                doc_count = 0
         
         return {
             "status": "RAG Chat API running",
@@ -461,18 +425,24 @@ async def chat(q: Question):
 async def debug_db():
     """Debug database endpoint"""
     try:
-        collections = chroma_client.list_collections()
+        collections_info = []
+        if vectorstore is not None:
+            try:
+                count = vectorstore._collection.count()  # type: ignore[attr-defined]
+            except Exception:
+                count = 0
+            collections_info.append(
+                {
+                    "name": "devotionals",
+                    "documents": count,
+                    "metadata": {},
+                }
+            )
+
         return {
             "db_path": DB_DIR,
             "exists": os.path.exists(DB_DIR),
-            "collections": [
-                {
-                    "name": c.name, 
-                    "documents": chroma_client.get_collection(c.name).count(),
-                    "metadata": chroma_client.get_collection(c.name).metadata
-                }
-                for c in collections
-            ],
+            "collections": collections_info,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -481,22 +451,18 @@ async def debug_db():
 async def health():
     """Health check endpoint"""
     try:
-        if chroma_client is None:
-            return {
-                "status": "unhealthy",
-                "reason": "chroma_client not initialized",
-            }, 503
-
         doc_count = 0
-        collections = chroma_client.list_collections()
-        if collections:
-            doc_count = chroma_client.get_collection(collections[0].name).count()
+        if vectorstore is not None:
+            try:
+                doc_count = vectorstore._collection.count()  # type: ignore[attr-defined]
+            except Exception:
+                doc_count = 0
         
         return {
             "status": "healthy" if doc_count > 0 else "degraded",
             "database": {
                 "documents": doc_count,
-                "collections": len(chroma_client.list_collections()) if chroma_client else 0
+                "collections": 1 if doc_count > 0 else 0
             },
             "timestamp": json.dumps(str(os.path.getmtime(__file__) if os.path.exists(__file__) else 0))
         }
@@ -507,25 +473,25 @@ async def health():
 async def debug_collection():
     """Detailed collection inspection"""
     try:
-        if not chroma_client:
-            return {"error": "Chroma client not initialized"}
-            
-        collections = chroma_client.list_collections()
         result = {
             "db_path": DB_DIR,
             "exists": os.path.exists(DB_DIR),
-            "collections_count": len(collections),
+            "collections_count": 1 if vectorstore is not None else 0,
             "build_keys_count": len(BUILD_KEYS),
             "csv_exists": os.path.exists(CSV_PATH)
         }
         
-        for collection in collections:
-            coll = chroma_client.get_collection(collection.name)
-            result[collection.name] = {
-                "count": coll.count(),
-                "metadata": coll.metadata,
-                "sample_ids": coll.get(limit=2)["ids"] if coll.count() > 0 else []
-            }
+        if vectorstore is not None:
+            try:
+                count = vectorstore._collection.count()  # type: ignore[attr-defined]
+                sample = vectorstore._collection.get(limit=2)  # type: ignore[attr-defined]
+                result["devotionals"] = {
+                    "count": count,
+                    "metadata": {},
+                    "sample_ids": sample.get("ids", []) if count > 0 else [],
+                }
+            except Exception as e:
+                result["devotionals_error"] = str(e)
         
         # Add CSV info
         if os.path.exists(CSV_PATH):
