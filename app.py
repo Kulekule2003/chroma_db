@@ -15,7 +15,7 @@ DB_DIR = os.path.join(BASE_DIR, "chroma_db")
 COLLECTION_NAME = "langchain"
 
 EMBEDDING_MODEL = "models/text-embedding-004"
-LLM_MODEL = "gemini-1.5-flash"
+LLM_MODEL = "gemini-2.5-flash"
 
 EXPECTED_DIM = 768
 
