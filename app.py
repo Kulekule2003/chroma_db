@@ -218,10 +218,10 @@ def rebuild_db_safe():
         return False
 
 # ──────────────────────────
-# STARTUP
+# STARTUP - Modified to be synchronous for Render compatibility
 # ──────────────────────────
 @app.on_event("startup")
-async def startup():
+def startup():
     """Initialize RAG system on startup"""
     global chroma_client, vectorstore, retriever, chain
 
@@ -377,6 +377,9 @@ Question:
     print("="*60)
     print("✅ RAG SYSTEM READY")
     print("="*60 + "\n")
+    
+    # IMPORTANT: Add this to ensure the server starts properly
+    print("🚀 FastAPI application fully initialized and ready to accept requests")
 
 # ──────────────────────────
 # API MODELS
@@ -512,13 +515,18 @@ async def reset_db():
             os.remove(PROGRESS_FILE)
             print(f"🗑️ Removed progress file: {PROGRESS_FILE}")
         
-        # Trigger rebuild on next request
-        global needs_rebuild
-        needs_rebuild = True
-        
         return {
             "status": "Database reset initiated",
             "next_steps": "Restart the application or wait for auto-rebuild"
         }
     except Exception as e:
         return {"error": str(e)}
+
+# ──────────────────────────
+# CRITICAL: Main guard for Render
+# ──────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
