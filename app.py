@@ -1,8 +1,4 @@
-# app.py
-"""FastAPI entrypoint for Render deployment."""
-
-# Ensure Chroma uses bundled SQLite on hosts like Render
-__import__("pysqlite3")  # type: ignore[import-not-found]
+__import__("pysqlite3") 
 import sys
 sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 
@@ -30,31 +26,26 @@ from langchain_chroma import Chroma
 from chromadb import Client
 from chromadb.config import Settings
 
-# ──────────────────────────
+
 # CONFIGURATION
-# ──────────────────────────
 warnings.filterwarnings("ignore", message=".*telemetry.*")
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-# ──────────────────────────
 # PATHS
-# ──────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join("/tmp", "chroma_db")  # Render ephemeral dir
-CSV_PATH = os.path.join(BASE_DIR, "devo.csv")
+CSV_PATH = os.path.join(BASE_DIR, " ")
 PROGRESS_FILE = os.path.join(BASE_DIR, "progress.json")
 
-# ──────────────────────────
 # APP
-# ──────────────────────────
-app = FastAPI(title="AI Scriptural Counsellor")
+app = FastAPI(title="AI Counsellor")
 
 # ──────────────────────────
 # CORS
 # ──────────────────────────
 origins = [
     "http://localhost:3000",
-    "https://the-mustard-seed.vercel.app",
+    
 ]
 
 app.add_middleware(
@@ -96,9 +87,8 @@ def get_embedder():
         google_api_key=next(build_key_cycle),
     )
 
-# ──────────────────────────
+
 # HELPERS
-# ──────────────────────────
 def format_docs(docs):
     """Format retrieved documents for context"""
     if not docs:
@@ -115,10 +105,10 @@ def format_docs(docs):
 
 def rebuild_db_safe():
     """Build Chroma DB safely on Render, rotating build keys"""
-    print("⚠️ Chroma DB missing — attempting rebuild")
+    print("Chroma DB missing — attempting rebuild")
 
     if not os.path.exists(CSV_PATH):
-        print("❌ devo.csv not found — skipping rebuild")
+        print("devo.csv not found — skipping rebuild")
         return False
 
     try:
@@ -151,7 +141,7 @@ def rebuild_db_safe():
                 documents.append(doc)
 
         if not documents:
-            print("❌ No documents loaded from CSV")
+            print("No documents loaded from CSV")
             return False
 
         # Chunk documents
@@ -160,7 +150,7 @@ def rebuild_db_safe():
         for i, chunk in enumerate(chunks):
             chunk.metadata["chunk_id"] = f"chunk_{i}"
 
-        print(f"✅ Loaded {len(documents)} docs, {len(chunks)} chunks")
+        print(f"Loaded {len(documents)} docs, {len(chunks)} chunks")
 
         # Try each build key until one works
         vectorstore = None
@@ -169,7 +159,7 @@ def rebuild_db_safe():
         for build_key in BUILD_KEYS:
             try:
                 key_suffix = build_key[-8:] if len(build_key) > 8 else build_key
-                print(f"🔄 Attempting to create vectorstore with key ending in ...{key_suffix}")
+                print(f"Attempting to create vectorstore with key ending in ...{key_suffix}")
                 
                 # Create embeddings function with current key
                 embedder = GoogleGenerativeAIEmbeddings(
@@ -189,28 +179,28 @@ def rebuild_db_safe():
                 if hasattr(vectorstore, "persist"):
                     vectorstore.persist()
                 else:
-                    print("ℹ️ Chroma instance has no 'persist' method; assuming auto-persistence.")
+                    print("Chroma instance has no 'persist' method; assuming auto-persistence.")
                 
                 success = True
-                print(f"✅ DB created successfully with key ending in ...{key_suffix}")
+                print(f"DB created successfully with key ending in ...{key_suffix}")
                 break
                 
             except Exception as e:
                 error_msg = str(e)
                 if "quota" in error_msg.lower() or "limit" in error_msg.lower():
-                    print(f"⛔ Key ...{key_suffix} quota exceeded, trying next")
+                    print(f"Key ...{key_suffix} quota exceeded, trying next")
                 else:
-                    print(f"⚠️ Key ...{key_suffix} failed: {error_msg[:100]}")
+                    print(f"Key ...{key_suffix} failed: {error_msg[:100]}")
                 continue
         
         if not success:
-            print("❌ All build keys failed")
+            print("All build keys failed")
             return False
         
         # Basic verification using the created vectorstore
         try:
             count = vectorstore._collection.count()  # type: ignore[attr-defined]
-            print(f"✅ DB verification via vectorstore: {count} documents in collection")
+            print(f"DB verification via vectorstore: {count} documents in collection")
 
             # Save progress for future reference
             progress_data = {
@@ -225,20 +215,18 @@ def rebuild_db_safe():
             return count > 0
 
         except Exception as e:
-            print(f"❌ DB verification via vectorstore failed: {e}")
+            print(f"DB verification via vectorstore failed: {e}")
             # Even if verification fails, we at least tried to build;
             # let startup logic decide how to proceed.
             return False
 
     except Exception as e:
-        print(f"❌ Failed to rebuild DB: {e}")
+        print(f"Failed to rebuild DB: {e}")
         import traceback
         traceback.print_exc()
         return False
 
-# ──────────────────────────
-# STARTUP - Modified to be synchronous for Render compatibility
-# ──────────────────────────
+
 @app.on_event("startup")
 def startup():
     """Initialize RAG system on startup"""
@@ -253,16 +241,16 @@ def startup():
     print(f"USER KEY RESERVED: True")
     
     # Always attempt a rebuild on startup; DB is ephemeral on Render (/tmp)
-    print("🔨 Initiating database rebuild (Render /tmp is ephemeral)...")
+    print("Initiating database rebuild (Render /tmp is ephemeral)...")
     success = rebuild_db_safe()
     if not success:
-        print("❌ Database rebuild may have failed - continuing with limited functionality")
+        print("Database rebuild may have failed - continuing with limited functionality")
 
     # Initialize Chroma client (for debug endpoints only)
     try:
         chroma_client = Client(Settings(persist_directory=DB_DIR, anonymized_telemetry=False))
     except Exception as e:
-        print(f"⚠️ Could not create Chroma client: {e}")
+        print(f"Could not create Chroma client: {e}")
         chroma_client = None
 
     # Initialize vectorstore directly using known collection name
@@ -282,10 +270,10 @@ def startup():
         try:
             doc_count = vectorstore._collection.count()  # type: ignore[attr-defined]
         except Exception as inner_e:
-            print(f"⚠️ Could not get document count from vectorstore: {inner_e}")
+            print(f"Could not get document count from vectorstore: {inner_e}")
             doc_count = 0
 
-        print(f"✅ Vectorstore initialized (devotionals) with {doc_count} documents")
+        print(f"Vectorstore initialized (devotionals) with {doc_count} documents")
 
     except Exception as e:
         print(f"❌ Failed to initialize vectorstore: {e}")
@@ -299,10 +287,10 @@ def startup():
             search_type="similarity", 
             search_kwargs={"k": 3}
         )
-        print(f"✅ Retriever ready (k=3)")
+        print(f"Retriever ready (k=3)")
     else:
         retriever = None
-        print("⚠️ No retriever available - using fallback responses")
+        print(" No retriever available - using fallback responses")
     
     # LLM setup with USER key
     llm = ChatGoogleGenerativeAI(
@@ -371,7 +359,7 @@ Question:
     print("="*60 + "\n")
     
     # IMPORTANT: Add this to ensure the server starts properly
-    print("🚀 FastAPI application fully initialized and ready to accept requests")
+    print("FastAPI application fully initialized and ready to accept requests")
 
 # ──────────────────────────
 # API MODELS
@@ -539,5 +527,5 @@ async def reset_db():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Starting server on port {port}")
+    print(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
