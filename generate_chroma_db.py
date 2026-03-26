@@ -15,14 +15,7 @@ DB_DIR = "chroma_db"
 PROGRESS_FILE = "progress.json"
 BATCH_SIZE = 50  # larger batch for efficiency
 
-API_KEYS = [
-    "AIzaSyAoCHHJgIbjJwrTAtyLnm2hQJIBd5XP4Ig",
-    "AIzaSyBu_TjtJMx1Y5BIyUtqb_kD8Ur99tT5VNo",
-    "AIzaSyBq7FCSJXdD1gc5-my9iebIH0eFDwwyT40",
-    "AIzaSyBlz-ExdB6u3GPNYVUgbpkKZx7pSWr3HWk",
-    "AIzaSyCkEdJJVJZU1gNX0r8R08iB6MjYzYcc2-w",
-    "AIzaSyCel4FzVfiS1DMM-quYz8O8zLQqnnDB84E"
-]
+API_KEYS = [ ] #comma seperated API Keys for only local experimentation
 
 key_cycle = cycle(API_KEYS)
 
